@@ -25,7 +25,9 @@ CMD_SET_HR_INTERVAL = 31    # 0x1F
 
 OSC_IP = "127.0.0.1"
 OSC_PORT = 9000
-POLL_SECONDS = 10
+POLL_SECONDS = 3
+IDLE_TIMEOUT = 2
+KEEPALIVE_INTERVAL = 30
 
 IS_LINUX = platform.system() == "Linux"
 
@@ -135,12 +137,19 @@ class HRBridge:
             print(f"\n  ✨ Streaming HR! Press Ctrl+C to stop.\n", flush=True)
 
             self.last_notify = asyncio.get_event_loop().time()
+            last_keepalive = self.last_notify
             while client.is_connected:
                 await asyncio.sleep(POLL_SECONDS)
-                idle = asyncio.get_event_loop().time() - self.last_notify
-                if idle >= 8:
+                now = asyncio.get_event_loop().time()
+                idle = now - self.last_notify
+                if idle >= IDLE_TIMEOUT:
                     pkt = make_packet(CMD_TRIGGER_HR, bytes([0x00]))
                     await client.write_gatt_char(BLE_FEE2_OUT, pkt, response=False)
+                if now - last_keepalive >= KEEPALIVE_INTERVAL:
+                    await client.write_gatt_char(
+                        BLE_FEE2_OUT, make_packet(CMD_START_DYNAMIC_HR, bytes([0x00])), response=False
+                    )
+                    last_keepalive = now
 
     async def run_forever(self):
         while True:
