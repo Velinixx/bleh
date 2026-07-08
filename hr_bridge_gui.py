@@ -340,6 +340,34 @@ def save_config(data):
         json.dump(data, f)
 
 
+# ── HR History ────────────────────────────────────────────────
+HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hr_history.json")
+
+def load_history():
+    try:
+        with open(HISTORY_PATH) as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_history(entries):
+    with open(HISTORY_PATH, "w") as f:
+        json.dump(entries, f, indent=2)
+
+def record_history(bpm, hr_min, hr_max):
+    import datetime
+    entries = load_history()
+    entries.append({
+        "ts": datetime.datetime.now().isoformat(),
+        "bpm": bpm,
+        "min": hr_min,
+        "max": hr_max,
+    })
+    if len(entries) > 50000:
+        entries = entries[-25000:]
+    save_history(entries)
+
+
 # ── GUI ─────────────────────────────────────────────────────
 # ── Constants ──────────────────────────────────────────────────
 BLANK_EGG_SECRETS = ("boihanny", "sr4 series")
@@ -490,6 +518,7 @@ class App(tk.Tk):
 
         self.bridge = None
         self.egg_dev = False
+        self._autostarted_this_session = False
 
         # ── top bar (with optional gradient) ─────────────────
         if GRADIENT_ENABLED:
@@ -564,6 +593,9 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # ── start VR auto-start monitor ──
+        self.after(5000, self._check_vrchat)
+
     # ── page switching ────────────────────────────────────────
     def _show_page(self, idx):
         for i, p in enumerate(self._pages):
@@ -607,6 +639,26 @@ class App(tk.Tk):
         tk.Label(vars_row, text="{bpm} {hr_min} {hr_max} {battery} {song} {artist} {title}",
                  bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left")
         self._qbtn(vars_row, "Variables you can use:\n{bpm} - heart rate\n{hr_min} / {hr_max} - min/max\n{battery} - battery %\n{song} / {artist} / {title} - media\nExample: ❤ {bpm} BPM | 🔋 {battery}%")
+
+        # template builder buttons
+        btn_row = tk.Frame(card2, bg=BG_CARD)
+        btn_row.pack(fill="x", pady=(2, 0))
+        for t in ("{bpm}", "{hr_min}", "{hr_max}", "{battery}", "{song}", "{artist}", "{title}"):
+            b = tk.Button(btn_row, text=t, font=("Consolas", 7), bg=BG_MID, fg=TEXT_WHITE,
+                          bd=0, padx=4, cursor="hand2", command=lambda t=t: self._insert_template(t))
+            b.pack(side="left", padx=(0, 2))
+        # emoji buttons
+        emoji_row = tk.Frame(card2, bg=BG_CARD)
+        emoji_row.pack(fill="x", pady=(2, 4))
+        for em in ("❤️", "💙", "💚", "💜", "🖤", "🔥", "🎵", "🎶", "🔋", "⚡"):
+            b = tk.Button(emoji_row, text=em, font=("", 8), bg=BG_MID, fg=TEXT_WHITE,
+                          bd=0, padx=3, cursor="hand2", command=lambda e=em: self._insert_template(e))
+            b.pack(side="left", padx=(0, 2))
+        self._mirror_egg_var = tk.BooleanVar(value=cfg.get("mirror_egg", False))
+        tk.Checkbutton(card2, text="Mirror to egg", variable=self._mirror_egg_var,
+                       bg=BG_CARD, fg=TEXT_GRAY, selectcolor=BG_INPUT,
+                       activebackground=BG_CARD, activeforeground=TEXT_WHITE,
+                       font=("", 7), cursor="hand2").pack(anchor="w")
 
         # egg mode
         self.egg_frame = tk.Frame(page, bg=BG_DARK)
@@ -664,6 +716,15 @@ class App(tk.Tk):
         self.chk_media = self._toggles_vars["media"]
         self.chk_extremes = self._toggles_vars["extremes"]
         self.chk_egg = self._toggles_vars["egg"]
+
+        f = tk.Frame(body, bg=BG_CARD)
+        f.pack(side="left", padx=(0, 8), pady=2)
+        self._autostart_var = tk.BooleanVar(value=cfg.get("autostart_vrchat", False))
+        tk.Checkbutton(f, text="\U0001f3ae  Auto-start with VRChat", variable=self._autostart_var,
+                       bg=BG_CARD, fg=TEXT_WHITE, selectcolor=BG_INPUT,
+                       activebackground=BG_CARD, activeforeground=TEXT_WHITE,
+                       font=("", 9), cursor="hand2").pack(side="left")
+        self._qbtn(f, "Auto-start bridge when VRChat\nor SteamVR process is detected")
 
         # media source
         src_row = tk.Frame(body, bg=BG_CARD)
@@ -730,6 +791,12 @@ class App(tk.Tk):
         self._toggle_hr_fields()
 
         self._theme_card(page, cfg)
+
+        hist_btn = tk.Button(page, text="\U0001f4ca  HR History", font=("", 8),
+                             bg=BG_MID, fg=TEXT_GRAY, bd=0, padx=10, pady=3,
+                             activebackground=BG_CARD, activeforeground=ACCENT_LIGHT,
+                             cursor="hand2", command=self._show_history)
+        hist_btn.pack(anchor="w", pady=(4, 0))
 
     # ── page: log ─────────────────────────────────────────────
     def _build_log_page(self, page):
@@ -819,6 +886,93 @@ class App(tk.Tk):
         self._egg_entry.configure(state=state)
         self._template_entry.configure(state="disabled" if mode else "normal")
 
+    def _insert_template(self, text):
+        """Insert text at cursor in template entry; mirror to egg if toggled."""
+        self._template_entry.insert("insert", text)
+        if hasattr(self, "_mirror_egg_var") and self._mirror_egg_var.get():
+            self._egg_entry.insert("insert", text)
+
+    def _show_history(self):
+        from datetime import datetime, date
+        entries = load_history()
+        if not entries:
+            tk.messagebox.showinfo("HR History", "No history recorded yet.", parent=self)
+            return
+        # group by day
+        days = {}
+        for e in entries:
+            d = datetime.fromisoformat(e["ts"]).strftime("%Y-%m-%d")
+            days.setdefault(d, {"min": 999, "max": 0})
+            days[d]["min"] = min(days[d]["min"], e["min"])
+            days[d]["max"] = max(days[d]["max"], e["max"])
+        win = tk.Toplevel(self)
+        win.title("HR History")
+        win.configure(bg=BG_DARK)
+        win.geometry("500x400")
+        win.minsize(400, 250)
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=6, pady=6)
+        for label, period_fn in [
+            ("Daily", lambda: sorted(days.items(), reverse=True)[:60]),
+            ("Weekly", lambda: self._group_history(entries, "%Y-W%W")),
+            ("Monthly", lambda: self._group_history(entries, "%Y-%m")),
+            ("Yearly", lambda: self._group_history(entries, "%Y")),
+        ]:
+            tab = tk.Frame(nb, bg=BG_DARK)
+            nb.add(tab, text=label)
+            data = period_fn()
+            if not data:
+                tk.Label(tab, text="No data", bg=BG_DARK, fg=TEXT_GRAY).pack(pady=20)
+                continue
+            text = tk.Text(tab, bg=BG_INPUT, fg=TEXT_WHITE, font=("Consolas", 9),
+                           bd=0, highlightthickness=0, wrap="none")
+            scroll = tk.Scrollbar(tab, orient="vertical", command=text.yview)
+            text.configure(yscrollcommand=scroll.set)
+            text.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+            text.insert("end", f"{'Period':<16} {'Min':>4}  {'Max':>4}\n")
+            text.insert("end", "─" * 28 + "\n")
+            for period, v in data:
+                text.insert("end", f"{period:<16} {v['min']:>4}  {v['max']:>4}\n")
+            text.config(state="disabled")
+
+    def _group_history(self, entries, fmt):
+        from datetime import datetime
+        groups = {}
+        for e in entries:
+            k = datetime.fromisoformat(e["ts"]).strftime(fmt)
+            groups.setdefault(k, {"min": 999, "max": 0})
+            groups[k]["min"] = min(groups[k]["min"], e["min"])
+            groups[k]["max"] = max(groups[k]["max"], e["max"])
+        return sorted(groups.items(), reverse=True)
+
+    # ── VRChat auto-start ─────────────────────────────────────
+    @staticmethod
+    def _is_vrchat_running():
+        targets = ("VRChat", "vrchat", "vrmonitor", "steamvr")
+        try:
+            if IS_LINUX:
+                out = os.popen("ps aux 2>/dev/null").read()
+            else:
+                out = os.popen("tasklist 2>nul").read()
+            return any(t.lower() in out.lower() for t in targets)
+        except:
+            return False
+
+    def _check_vrchat(self):
+        if not getattr(self, "_autostart_var", None) or not self._autostart_var.get():
+            self.after(10000, self._check_vrchat)
+            return
+        if self._is_vrchat_running():
+            if not self.bridge or not self.bridge.running:
+                if not getattr(self, "_autostarted_this_session", False):
+                    self._autostarted_this_session = True
+                    self._write_log("  \U0001f3ae VRChat/SteamVR detected, auto-starting\u2026")
+                    self._toggle()
+        else:
+            self._autostarted_this_session = False
+        self.after(10000, self._check_vrchat)
+
     # ── theme helpers ──────────────────────────────────────────
     def _redraw_top_gradient(self):
         c = getattr(self, "_gradient_top", None)
@@ -905,42 +1059,52 @@ class App(tk.Tk):
     def write_log(self, msg):
         self.after(0, self._write_log, msg)
 
+    # ── config gathering ────────────────────────────────────────
+    def _gather_config(self):
+        """Collect all current settings into a flat dict for saving."""
+        d = {
+            "address": self.addr.get(),
+            "template": self.template.get(),
+            "hr": self.chk_hr.get(),
+            "battery": self.chk_batt.get(),
+            "media": self.chk_media.get(),
+            "media_source": self.media_source.get(),
+            "pear_port": self.pear_port.get(),
+            "hr_source": self.hr_source.get(),
+            "hyperate_id": self.hyperate_id.get(),
+            "hyperate_key": self.hyperate_key.get(),
+            "extremes": self.chk_extremes.get(),
+            "egg": self.chk_egg.get(),
+            "egg_text": self.egg_txt.get(),
+            "blank_egg": self.egg_dev,
+            "mirror_egg": self._mirror_egg_var.get() if hasattr(self, "_mirror_egg_var") else False,
+            "autostart_vrchat": self._autostart_var.get() if hasattr(self, "_autostart_var") else False,
+            "poll_interval": self._dev_vars["poll_interval"].get() if self.egg_dev else 3,
+            "keepalive_interval": self._dev_vars["keepalive_interval"].get() if self.egg_dev else 30,
+            "osc_host": self._dev_vars["osc_host"].get() if self.egg_dev else "127.0.0.1",
+            "osc_port": self._dev_vars["osc_port"].get() if self.egg_dev else 9000,
+            "color_bg_dark": self._color_vars["bg_dark"].get(),
+            "color_bg_mid": self._color_vars["bg_mid"].get(),
+            "color_bg_card": self._color_vars["bg_card"].get(),
+            "color_bg_input": self._color_vars["bg_input"].get(),
+            "color_accent": self._color_vars["accent"].get(),
+            "color_accent_light": self._color_vars["accent_light"].get(),
+            "color_text_white": self._color_vars["text_white"].get(),
+            "color_text_gray": self._color_vars["text_gray"].get(),
+            "gradient_enabled": self._gradient_var.get(),
+            "gradient_from": self._grad_from_var.get(),
+            "gradient_to": self._grad_to_var.get(),
+        }
+        if self.bridge and self.bridge.running and self.bridge.hr_max > 0:
+            record_history(self.bridge.bpm, self.bridge.hr_min, self.bridge.hr_max)
+        return d
+
     # ── toggle bridge ─────────────────────────────────────────
     def _toggle(self):
         if self.bridge and self.bridge.running:
             self.bridge.stop()
             self.btn.config(text="\u25b6  Start", bg=SUCCESS)
-            save_config({
-                "address": self.addr.get(),
-                "template": self.template.get(),
-                "hr": self.chk_hr.get(),
-                "battery": self.chk_batt.get(),
-                "media": self.chk_media.get(),
-                "media_source": self.media_source.get(),
-                "pear_port": self.pear_port.get(),
-                "hr_source": self.hr_source.get(),
-                "hyperate_id": self.hyperate_id.get(),
-                "hyperate_key": self.hyperate_key.get(),
-                "extremes": self.chk_extremes.get(),
-                "egg": self.chk_egg.get(),
-                "egg_text": self.egg_txt.get(),
-                "blank_egg": self.egg_dev,
-                "poll_interval": self._dev_vars["poll_interval"].get() if self.egg_dev else 3,
-                "keepalive_interval": self._dev_vars["keepalive_interval"].get() if self.egg_dev else 30,
-                "osc_host": self._dev_vars["osc_host"].get() if self.egg_dev else "127.0.0.1",
-                "osc_port": self._dev_vars["osc_port"].get() if self.egg_dev else 9000,
-                "color_bg_dark": self._color_vars["bg_dark"].get(),
-                "color_bg_mid": self._color_vars["bg_mid"].get(),
-                "color_bg_card": self._color_vars["bg_card"].get(),
-                "color_bg_input": self._color_vars["bg_input"].get(),
-                "color_accent": self._color_vars["accent"].get(),
-                "color_accent_light": self._color_vars["accent_light"].get(),
-                "color_text_white": self._color_vars["text_white"].get(),
-                "color_text_gray": self._color_vars["text_gray"].get(),
-                "gradient_enabled": self._gradient_var.get(),
-                "gradient_from": self._grad_from_var.get(),
-                "gradient_to": self._grad_to_var.get(),
-            })
+            save_config(self._gather_config())
         else:
             self.log.config(state="normal")
             self.log.delete("1.0", "end")
@@ -973,6 +1137,7 @@ class App(tk.Tk):
             self.btn.config(text="\u25a0  Stop", bg=DANGER)
 
     def _on_close(self):
+        save_config(self._gather_config())
         if self.bridge and self.bridge.running:
             self.bridge.stop()
         self.destroy()
