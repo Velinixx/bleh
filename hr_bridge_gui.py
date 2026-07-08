@@ -57,7 +57,7 @@ else:
 
 # ── Bridge Engine ───────────────────────────────────────────
 class HRBridge:
-    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, status_text="", poll_interval=3, keepalive_interval=30, osc_host="127.0.0.1", osc_port=9000):
+    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, show_extremes=True, status_text="", poll_interval=3, keepalive_interval=30, osc_host="127.0.0.1", osc_port=9000):
         self.address = address
         self.template = template
         self.log = log_cb
@@ -65,11 +65,14 @@ class HRBridge:
         self.show_battery = show_battery
         self.show_media = show_media
         self.show_status = show_status
+        self.show_extremes = show_extremes
         self.status_text = status_text
         self.poll_interval = poll_interval
         self.keepalive_interval = keepalive_interval
         self.osc = SimpleUDPClient(osc_host, osc_port)
         self.bpm = 0
+        self.hr_min = 999
+        self.hr_max = 0
         self.battery = 0
         self.running = False
         self.song = ""
@@ -84,6 +87,8 @@ class HRBridge:
             return self.status_text.strip()
         text = self.template
         text = text.replace("{bpm}", str(self.bpm))
+        text = text.replace("{hr_min}", str(self.hr_min if self.hr_min != 999 else self.bpm))
+        text = text.replace("{hr_max}", str(self.hr_max))
         text = text.replace("{battery}", str(self.battery))
         if self.show_media:
             media_parts = []
@@ -101,6 +106,8 @@ class HRBridge:
         parts = []
         if self.show_hr:
             parts.append(f"\u2764\ufe0f {self.bpm} BPM")
+        if self.show_extremes and self.hr_max > 0:
+            parts.append(f"\U0001f7e2 {self.hr_min}\u2194{self.hr_max}")
         if self.show_battery:
             parts.append(f"\U0001f50b {self.battery}%")
         if self.show_media and (self.song or self.artist):
@@ -114,6 +121,8 @@ class HRBridge:
         self.osc.send_message("/avatar/parameters/floatHR", min(self.bpm / 255.0, 1.0))
         self.osc.send_message("/avatar/parameters/HRBattery", self.battery)
         self.osc.send_message("/avatar/parameters/HRBatteryFloat", self.battery / 100.0)
+        self.osc.send_message("/avatar/parameters/HRMin", int(self.hr_min if self.hr_min != 999 else self.bpm))
+        self.osc.send_message("/avatar/parameters/HRMax", int(self.hr_max))
         if chat:
             self.osc.send_message("/chatbox/input", [chat, True])
         self._log_line()
@@ -124,8 +133,7 @@ class HRBridge:
         flags = data[0]
         bpm = data[2] if (flags & 1) else data[1]
         if 20 <= bpm <= 250:
-            self.bpm = bpm
-            self.send_osc()
+            self._update_bpm(bpm)
 
     def on_fee3(self, _h, data):
         if len(data) < 5 or data[0] != 0xFE or data[1] != 0xEA:
@@ -134,8 +142,15 @@ class HRBridge:
         if cmd == CMD_TRIGGER_HR and len(data) >= 6:
             bpm = data[5]
             if 20 <= bpm <= 250:
-                self.bpm = bpm
-                self.send_osc()
+                self._update_bpm(bpm)
+
+    def _update_bpm(self, bpm):
+        self.bpm = bpm
+        if bpm < self.hr_min:
+            self.hr_min = bpm
+        if bpm > self.hr_max:
+            self.hr_max = bpm
+        self.send_osc()
 
     async def _cache_linux(self):
         proc = await asyncio.create_subprocess_exec(
@@ -151,6 +166,7 @@ class HRBridge:
         if IS_LINUX:
             self.log_msg("\U0001f504 Caching\u2026")
             await self._cache_linux()
+        self.reset_hr_extremes()
         self.log_msg(f"\U0001f4e1 Connecting to {self.address}\u2026")
         kwargs = {"timeout": 20.0}
         if IS_LINUX:
@@ -218,6 +234,12 @@ class HRBridge:
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self.run_forever())
 
+    def reset_hr_extremes(self):
+        self.hr_min = 999
+        self.hr_max = 0
+        self.bpm = 0
+        self.log_msg("  \U0001f504 HR extremes reset")
+
     def stop(self):
         self.running = False
         if self._client and self._client.is_connected:
@@ -282,8 +304,11 @@ class App(ttk.Frame):
         if not HAS_MEDIA:
             ttk.Label(toggles, text="(Win only)", font=("", 8), foreground="gray").grid(row=0, column=3, padx=(0, 4))
 
+        self.chk_extremes = tk.BooleanVar(value=cfg.get("extremes", True))
+        ttk.Checkbutton(toggles, text="Min/Max HR", variable=self.chk_extremes).grid(row=0, column=4, sticky="w", padx=4)
+
         self.chk_egg = tk.BooleanVar(value=cfg.get("egg", False))
-        ttk.Checkbutton(toggles, text="Egg Mode", variable=self.chk_egg, command=self._on_egg_toggle).grid(row=0, column=4, sticky="w", padx=4)
+        ttk.Checkbutton(toggles, text="Egg Mode", variable=self.chk_egg, command=self._on_egg_toggle).grid(row=0, column=5, sticky="w", padx=4)
 
         # ── egg text / template ──
         self.egg_frame = ttk.Frame(self)
@@ -302,7 +327,7 @@ class App(ttk.Frame):
         ttk.Entry(self.template_frame, textvariable=self.template, width=40).grid(row=0, column=1, padx=6, sticky="ew")
 
         # placeholder hint
-        ttk.Label(self, text="Placeholders: {bpm} {battery} {song} {artist} {title}", font=("", 7), foreground="gray").grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Label(self, text="Placeholders: {bpm} {hr_min} {hr_max} {battery} {song} {artist} {title}", font=("", 7), foreground="gray").grid(row=5, column=0, columnspan=3, sticky="w")
 
         # ── dev frame (hidden until egg dev unlocked) ──
         self.dev_frame = ttk.LabelFrame(self, text="\u2699 Dev Options", padding=8)
@@ -332,6 +357,8 @@ class App(ttk.Frame):
         self.dev_osc_port = tk.IntVar(value=cfg.get("osc_port", 9000))
         ttk.Spinbox(self.dev_frame, from_=1024, to=65535, textvariable=self.dev_osc_port, width=6).grid(row=1, column=3, sticky="w", padx=4, pady=(4, 0))
 
+        ttk.Button(self.dev_frame, text="Reset Min/Max", command=self._reset_extremes).grid(row=2, column=0, columnspan=4, pady=(6, 0))
+
         # ── start/stop ──
         btn_row = ttk.Frame(self)
         btn_row.grid(row=7, column=0, columnspan=3, pady=8)
@@ -343,6 +370,10 @@ class App(ttk.Frame):
         self.log.grid(row=8, column=0, columnspan=3)
         self.log.insert("end", "Ready \u2014 press Start to begin.\n")
         self.log.see("end")
+
+    def _reset_extremes(self):
+        if self.bridge:
+            self.bridge.reset_hr_extremes()
 
     def _check_blank_egg(self, _event=None):
         txt = self.egg_txt.get().strip().lower()
@@ -386,6 +417,7 @@ class App(ttk.Frame):
                 "hr": self.chk_hr.get(),
                 "battery": self.chk_batt.get(),
                 "media": self.chk_media.get(),
+                "extremes": self.chk_extremes.get(),
                 "egg": self.chk_egg.get(),
                 "egg_text": self.egg_txt.get(),
                 "blank_egg": self.egg_dev,
@@ -407,6 +439,7 @@ class App(ttk.Frame):
                 show_hr=self.chk_hr.get(),
                 show_battery=self.chk_batt.get(),
                 show_media=self.chk_media.get(),
+                show_extremes=self.chk_extremes.get(),
                 show_status=self.chk_egg.get(),
                 status_text=self.egg_txt.get(),
                 poll_interval=poll,
