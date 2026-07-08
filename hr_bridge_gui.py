@@ -11,7 +11,12 @@ from typing import Optional
 
 from bleak import BleakClient, BleakScanner
 from pythonosc.udp_client import SimpleUDPClient
-import websockets
+
+try:
+    import websockets
+    HAS_WS = True
+except ImportError:
+    HAS_WS = False
 
 # media detection
 try:
@@ -238,6 +243,9 @@ class HRBridge:
             self.log_msg("  \u26a0\ufe0f Disconnected")
 
     async def run_hyperate(self):
+        if not HAS_WS:
+            self.log_msg("  \u274c websockets library not installed")
+            return
         self.reset_hr_extremes()
         url = f"wss://app.hyperate.io/ws/{self.hyperate_id}?token={self.hyperate_key}"
         self.log_msg(f"\U0001f4e1 Connecting to HypeRate\u2026")
@@ -575,7 +583,8 @@ class App(tk.Tk):
         tk.Label(hr_body, text="Source:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
         self.hr_source = tk.StringVar(value=cfg.get("hr_source", "ble"))
         self.hr_source.trace_add("write", self._toggle_hr_fields)
-        hr_menu = tk.OptionMenu(hr_body, self.hr_source, "ble", "hyperate")
+        hr_sources = ["ble"] + (["hyperate"] if HAS_WS else [])
+        hr_menu = tk.OptionMenu(hr_body, self.hr_source, *hr_sources)
         hr_menu.config(bg=BG_MID, fg=TEXT_WHITE, bd=0, highlightthickness=0, activebackground=BG_CARD)
         hr_menu["menu"].config(bg=BG_MID, fg=TEXT_WHITE)
         hr_menu.pack(side="left", padx=(6, 0))

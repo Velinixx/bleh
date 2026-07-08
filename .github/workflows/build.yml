@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install bleak python-osc pyinstaller
+      - run: pip install bleak python-osc pyinstaller websockets
       - name: Install winrt (optional, for media support)
         continue-on-error: true
         run: pip install winrt 2>$null
