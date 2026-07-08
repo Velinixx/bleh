@@ -11,6 +11,7 @@ from typing import Optional
 
 from bleak import BleakClient, BleakScanner
 from pythonosc.udp_client import SimpleUDPClient
+import websockets
 
 # media detection
 try:
@@ -76,7 +77,7 @@ def get_pear_media_sync(port):
 
 # ── Bridge Engine ───────────────────────────────────────────
 class HRBridge:
-    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, show_extremes=True, status_text="", poll_interval=3, keepalive_interval=30, osc_host="127.0.0.1", osc_port=9000, media_source="none", pear_port=PEAR_DEFAULT_PORT):
+    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, show_extremes=True, status_text="", poll_interval=3, keepalive_interval=30, osc_host="127.0.0.1", osc_port=9000, media_source="none", pear_port=PEAR_DEFAULT_PORT, hr_source="ble", hyperate_id="", hyperate_key=""):
         self.address = address
         self.template = template
         self.log = log_cb
@@ -90,6 +91,9 @@ class HRBridge:
         self.keepalive_interval = keepalive_interval
         self.media_source = media_source
         self.pear_port = pear_port
+        self.hr_source = hr_source
+        self.hyperate_id = hyperate_id
+        self.hyperate_key = hyperate_key
         self.osc = SimpleUDPClient(osc_host, osc_port)
         self.bpm = 0
         self.hr_min = 999
@@ -233,10 +237,47 @@ class HRBridge:
                         self.artist = media.get("artist", "")
             self.log_msg("  \u26a0\ufe0f Disconnected")
 
+    async def run_hyperate(self):
+        self.reset_hr_extremes()
+        url = f"wss://app.hyperate.io/ws/{self.hyperate_id}?token={self.hyperate_key}"
+        self.log_msg(f"\U0001f4e1 Connecting to HypeRate\u2026")
+        async with websockets.connect(url) as ws:
+            self.log_msg("  \u2705 Connected to HypeRate")
+            await ws.send(json.dumps({"topic": f"hr:{self.hyperate_id}", "event": "phx_join", "payload": {}, "ref": "1"}))
+            last_media = 0
+            while self.running:
+                try:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=35))
+                except asyncio.TimeoutError:
+                    try:
+                        await ws.send(json.dumps({"event": "ping", "payload": {"timestamp": asyncio.get_event_loop().time()}}))
+                    except:
+                        pass
+                    continue
+                if msg.get("event") == "phx_reply":
+                    self.log_msg("  ✅ Joined HypeRate channel")
+                elif msg.get("event") == "hr_update":
+                    bpm = msg.get("payload", {}).get("hr", 0)
+                    if 20 <= bpm <= 250:
+                        self._update_bpm(bpm)
+                elif msg.get("event") == "phx_close":
+                    self.log_msg("  \u26a0\ufe0f HypeRate channel closed")
+                    break
+                if self.show_media and self.media_source != "none":
+                    now = asyncio.get_event_loop().time()
+                    if now - last_media >= 5:
+                        media = await self._fetch_media()
+                        if media:
+                            self.song = media.get("title", "")
+                            self.artist = media.get("artist", "")
+                        last_media = now
+            self.log_msg("  \u26a0\ufe0f Disconnected from HypeRate")
+
     async def run_forever(self):
+        runner = self.run_hyperate if self.hr_source == "hyperate" else self.run_once
         while self.running:
             try:
-                await self.run_once()
+                await runner()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -523,6 +564,39 @@ class App(tk.Tk):
         if not HAS_WINRT:
             tk.Label(src_row, text="(winrt unavailable)", bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(6, 0))
 
+        # ── HR source ───────────────────────────────────────────
+        hr_card = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
+        hr_card.pack(fill="x", pady=(6, 0))
+        tk.Label(hr_card, text="Heart Rate Source", bg=BG_CARD, fg=ACCENT_LIGHT, font=("", 9, "bold"), anchor="w").pack(fill="x")
+
+        hr_body = tk.Frame(hr_card, bg=BG_CARD)
+        hr_body.pack(fill="x", pady=(6, 0))
+
+        tk.Label(hr_body, text="Source:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self.hr_source = tk.StringVar(value=cfg.get("hr_source", "ble"))
+        self.hr_source.trace_add("write", self._toggle_hr_fields)
+        hr_menu = tk.OptionMenu(hr_body, self.hr_source, "ble", "hyperate")
+        hr_menu.config(bg=BG_MID, fg=TEXT_WHITE, bd=0, highlightthickness=0, activebackground=BG_CARD)
+        hr_menu["menu"].config(bg=BG_MID, fg=TEXT_WHITE)
+        hr_menu.pack(side="left", padx=(6, 0))
+
+        # HypeRate fields (hidden when BLE selected)
+        self.hr_id_frame = tk.Frame(hr_card, bg=BG_CARD)
+        self.hr_id_frame.pack(fill="x", pady=(2, 0))
+        tk.Label(self.hr_id_frame, text="Device ID:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self.hyperate_id = tk.StringVar(value=cfg.get("hyperate_id", ""))
+        tk.Entry(self.hr_id_frame, textvariable=self.hyperate_id, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
+                 bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=18).pack(side="left", padx=(4, 0))
+
+        self.hr_key_frame = tk.Frame(hr_card, bg=BG_CARD)
+        self.hr_key_frame.pack(fill="x", pady=(2, 0))
+        tk.Label(self.hr_key_frame, text="API Key:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self.hyperate_key = tk.StringVar(value=cfg.get("hyperate_key", ""))
+        tk.Entry(self.hr_key_frame, textvariable=self.hyperate_key, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
+                 bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=28, show="*").pack(side="left", padx=(4, 0))
+
+        self._toggle_hr_fields()
+
         # reset extremes
         reset_btn = tk.Button(card, text="Reset Min/Max", font=("", 8),
                               bg=BG_MID, fg=TEXT_GRAY, bd=0, padx=10, pady=2,
@@ -588,6 +662,14 @@ class App(tk.Tk):
         self.dev_frame.pack(fill="x", pady=(6, 0))
 
     # ── helpers ───────────────────────────────────────────────
+    def _toggle_hr_fields(self, *_):
+        show = self.hr_source.get() == "hyperate"
+        for f in (self.hr_id_frame, self.hr_key_frame):
+            if show:
+                f.pack(fill="x", pady=(2, 0))
+            else:
+                f.pack_forget()
+
     def _reset_extremes(self):
         if self.bridge:
             self.bridge.reset_hr_extremes()
@@ -629,6 +711,9 @@ class App(tk.Tk):
                 "media": self.chk_media.get(),
                 "media_source": self.media_source.get(),
                 "pear_port": self.pear_port.get(),
+                "hr_source": self.hr_source.get(),
+                "hyperate_id": self.hyperate_id.get(),
+                "hyperate_key": self.hyperate_key.get(),
                 "extremes": self.chk_extremes.get(),
                 "egg": self.chk_egg.get(),
                 "egg_text": self.egg_txt.get(),
@@ -655,6 +740,9 @@ class App(tk.Tk):
                 show_media=self.chk_media.get(),
                 media_source=self.media_source.get(),
                 pear_port=self.pear_port.get(),
+                hr_source=self.hr_source.get(),
+                hyperate_id=self.hyperate_id.get(),
+                hyperate_key=self.hyperate_key.get(),
                 show_extremes=self.chk_extremes.get(),
                 show_status=self.chk_egg.get(),
                 status_text=self.egg_txt.get(),
