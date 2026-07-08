@@ -108,6 +108,8 @@ class HRBridge:
         self.song = ""
         self.artist = ""
         self._client = None
+        self.bpm_history = []
+        self._pulse = 0.0
 
     def log_msg(self, msg):
         self.log(msg)
@@ -176,6 +178,10 @@ class HRBridge:
 
     def _update_bpm(self, bpm):
         self.bpm = bpm
+        self._pulse = 1.0
+        self.bpm_history.append(bpm)
+        if len(self.bpm_history) > 180:
+            self.bpm_history = self.bpm_history[-180:]
         if bpm < self.hr_min:
             self.hr_min = bpm
         if bpm > self.hr_max:
@@ -383,7 +389,7 @@ TEXT_WHITE  = "#f0eefe"
 TEXT_GRAY   = "#a8a0c8"
 SUCCESS     = "#4ade80"
 DANGER      = "#ef4444"
-GRADIENT_ENABLED = False
+GRADIENT_MODE = "off"
 GRADIENT_FROM = "#1a1a2e"
 GRADIENT_TO   = "#7c5cbf"
 
@@ -400,15 +406,15 @@ def _lerp_color(a, b, t):
     return _rgb_to_hex(ar + (br - ar) * t, ag + (bg - ag) * t, ab + (bb - ab) * t)
 
 def apply_palette(cfg):
-    global BG_DARK, BG_MID, BG_CARD, BG_INPUT, ACCENT, ACCENT_LIGHT, TEXT_WHITE, TEXT_GRAY, GRADIENT_ENABLED, GRADIENT_FROM, GRADIENT_TO
+    global BG_DARK, BG_MID, BG_CARD, BG_INPUT, ACCENT, ACCENT_LIGHT, TEXT_WHITE, TEXT_GRAY, GRADIENT_MODE, GRADIENT_FROM, GRADIENT_TO
     m = {"bg_dark": "BG_DARK", "bg_mid": "BG_MID", "bg_card": "BG_CARD", "bg_input": "BG_INPUT",
          "accent": "ACCENT", "accent_light": "ACCENT_LIGHT", "text_white": "TEXT_WHITE", "text_gray": "TEXT_GRAY"}
     for key, gname in m.items():
         val = cfg.get(f"color_{key}")
         if val:
             globals()[gname] = val
-    if cfg.get("gradient_enabled", False):
-        GRADIENT_ENABLED = True
+    GRADIENT_MODE = cfg.get("gradient_mode", "off")
+    if GRADIENT_MODE != "off":
         GRADIENT_FROM = cfg.get("gradient_from", GRADIENT_FROM)
         GRADIENT_TO = cfg.get("gradient_to", GRADIENT_TO)
 
@@ -520,29 +526,22 @@ class App(tk.Tk):
         self.egg_dev = False
         self._autostarted_this_session = False
 
-        # ── top bar (with optional gradient) ─────────────────
-        if GRADIENT_ENABLED:
-            top = tk.Canvas(self, height=48, highlightthickness=0)
-            top.pack(fill="x")
-            self._gradient_top = top
-            self.after(20, lambda: self._redraw_top_gradient())
-            top.create_text(14, 26, text="C20  →  VRChat Bridge",
-                            fill=ACCENT_LIGHT, font=("", 11, "bold"), anchor="w")
-        else:
-            top = tk.Frame(self, bg=BG_MID, height=48)
-            top.pack(fill="x")
-            top.pack_propagate(False)
-            tk.Label(top, text="C20  →  VRChat Bridge", bg=BG_MID,
-                     fg=ACCENT_LIGHT, font=("", 11, "bold")).pack(side="left", padx=14, pady=10)
+        # ── top bar ─────────────────────────────────────────
+        top = tk.Frame(self, bg=BG_MID, height=48)
+        top.pack(fill="x")
+        top.pack_propagate(False)
+        tk.Label(top, text="C20  →  VRChat Bridge", bg=BG_MID,
+                 fg=ACCENT_LIGHT, font=("", 11, "bold")).pack(side="left", padx=14, pady=10)
 
-        # ── body: sidebar + content ──────────────────────────
-        body = tk.Frame(self, bg=BG_DARK)
+        # ── body canvas (gradient background) ────────────────
+        body = tk.Canvas(self, highlightthickness=0, bg=BG_DARK)
         body.pack(fill="both", expand=True)
+        self._body_canvas = body
 
-        # sidebar
+        # sidebar (canvas window)
         sidebar = tk.Frame(body, bg=BG_MID, width=52)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
+        self._sidebar_frame = sidebar
+        self._sidebar_wid = self._body_canvas.create_window(0, 0, window=sidebar, anchor="nw")
 
         icons = ["\u2764", "\u2699", "\u2630"]
         tips  = ["Status", "Features", "Log"]
@@ -554,9 +553,15 @@ class App(tk.Tk):
             btn.pack(pady=(12 if i == 0 else 4, 4))
             self.nav_btns.append(btn)
 
-        # content area
+        # content area (canvas window)
         content = tk.Frame(body, bg=BG_DARK, padx=14, pady=10)
-        content.pack(side="right", fill="both", expand=True)
+        self._content_frame = content
+        self._content_wid = self._body_canvas.create_window(52, 0, window=content, anchor="nw")
+
+        # bind resize to reposition windows + redraw gradient
+        body.bind("<Configure>", self._on_body_resize)
+        # force initial redraw after layout
+        self.after(20, self._on_body_resize)
 
         # ── pages ────────────────────────────────────────────
         self._pages = []
@@ -591,6 +596,18 @@ class App(tk.Tk):
 
         self._show_page(0)
 
+        # ── status bar ────────────────────────────────────
+        self._status_bar = tk.Frame(self, bg=BG_MID, height=24)
+        self._status_bar.pack(fill="x")
+        self._status_bar.pack_propagate(False)
+        self._status_label = tk.Label(self._status_bar, text="\u25cf Idle", anchor="w",
+                                      bg=BG_MID, fg=TEXT_GRAY, font=("", 8))
+        self._status_label.pack(side="left", padx=8)
+        self._status_osc = tk.Label(self._status_bar, text="OSC: --", anchor="e",
+                                    bg=BG_MID, fg=TEXT_GRAY, font=("", 8))
+        self._status_osc.pack(side="right", padx=8)
+        self._update_statusbar()
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # ── start VR auto-start monitor ──
@@ -618,6 +635,7 @@ class App(tk.Tk):
 
     # ── page: status ──────────────────────────────────────────
     def _build_status_page(self, page, cfg):
+        self._build_bpm_display(page)
         # address
         card = self._card(page, "Watch")
         addr_row = tk.Frame(card, bg=BG_CARD)
@@ -892,6 +910,103 @@ class App(tk.Tk):
         if hasattr(self, "_mirror_egg_var") and self._mirror_egg_var.get():
             self._egg_entry.insert("insert", text)
 
+    # ── polished BPM display ──────────────────────────────────
+    def _build_bpm_display(self, page):
+        self._disp_frame = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
+        self._disp_frame.pack(fill="x", pady=(0, 6))
+        self._bpm_canvas = tk.Canvas(self._disp_frame, height=110, bg=BG_CARD,
+                                     highlightthickness=0, cursor="hand2")
+        self._bpm_canvas.pack(fill="x")
+        self._graph_canvas = tk.Canvas(self._disp_frame, height=60, bg=BG_CARD,
+                                       highlightthickness=0)
+        self._graph_canvas.pack(fill="x", pady=(2, 0))
+        self._update_display()
+
+    def _update_display(self):
+        def _format(n):
+            return str(int(n)) if n < 999 else "—"
+        pw = self._bpm_canvas.winfo_width() or 400
+        ph = 110
+        self._bpm_canvas.delete("all")
+        if self.bridge and self.bridge.running:
+            bpm = self.bridge.bpm
+            pulse = getattr(self.bridge, "_pulse", 0)
+            if pulse > 0:
+                self.bridge._pulse = max(0, pulse - 0.04)
+            connected = bpm > 0
+        else:
+            bpm = 0
+            pulse = 0
+            connected = False
+
+        # background
+        self._bpm_canvas.create_rectangle(0, 0, pw, ph, fill=BG_CARD, outline="")
+
+        # pulsing heart outline
+        heart_size = 28 + (pulse * 12 if connected else 0)
+        hx, hy = 40, ph // 2
+        self._bpm_canvas.create_text(hx, hy, text="\u2764",
+                                     fill=ACCENT_LIGHT if connected else TEXT_GRAY,
+                                     font=("", int(heart_size)), anchor="center")
+
+        # big BPM number
+        color = ACCENT_LIGHT if connected else TEXT_GRAY
+        self._bpm_canvas.create_text(pw // 2, ph // 2 - 4, text=_format(bpm),
+                                     fill=color, font=("", 40, "bold"), anchor="center")
+
+        # BPM label
+        self._bpm_canvas.create_text(pw // 2, ph // 2 + 28, text="BPM",
+                                     fill=TEXT_GRAY, font=("", 10), anchor="center")
+
+        # min / max
+        if self.bridge:
+            self._bpm_canvas.create_text(pw - 14, ph // 2 - 12, text=f"\u25bc {_format(self.bridge.hr_min if self.bridge.hr_min != 999 else 0)}",
+                                         fill=SUCCESS, font=("", 9), anchor="e")
+            self._bpm_canvas.create_text(pw - 14, ph // 2 + 10, text=f"\u25b2 {_format(self.bridge.hr_max)}",
+                                         fill=DANGER, font=("", 9), anchor="e")
+
+        # ── graph ──
+        gw = self._graph_canvas.winfo_width() or 400
+        gh = 60
+        self._graph_canvas.delete("all")
+        self._graph_canvas.create_rectangle(0, 0, gw, gh, fill=BG_CARD, outline="")
+        if self.bridge and len(self.bridge.bpm_history) >= 2:
+            hist = self.bridge.bpm_history[-60:]
+            mn = min(hist) - 5
+            mx = max(hist) + 5
+            if mx - mn < 10:
+                mx = mn + 10
+            pts = []
+            for i, v in enumerate(hist):
+                x = (i / (len(hist) - 1)) * gw
+                y = gh - ((v - mn) / (mx - mn)) * (gh - 14) - 7
+                pts.extend([x, y])
+            if len(pts) >= 4:
+                self._graph_canvas.create_line(pts, fill=ACCENT, width=2, smooth=True)
+            # fill under line
+            if len(pts) >= 2:
+                fill_pts = [pts[0], pts[1], gw, gh, 0, gh]
+                self._graph_canvas.create_polygon(fill_pts, fill=ACCENT, stipple="gray25", outline="")
+        else:
+            self._graph_canvas.create_text(gw // 2, gh // 2, text="Waiting for HR data\u2026",
+                                           fill=TEXT_GRAY, font=("", 8))
+
+        self.after(350, self._update_display)
+
+    def _update_statusbar(self):
+        running = self.bridge and self.bridge.running
+        bpm = self.bridge.bpm if self.bridge else 0
+        src = self.hr_source.get() if hasattr(self, "hr_source") else "ble"
+        if running and bpm > 0:
+            self._status_label.config(text=f"\u25cf Connected  \u2764\ufe0f {bpm}", fg=ACCENT_LIGHT)
+        elif running:
+            self._status_label.config(text="\u25cb Connecting\u2026", fg="yellow")
+        else:
+            self._status_label.config(text="\u25cf Idle", fg=TEXT_GRAY)
+        if hasattr(self, "_dev_vars") and "osc_host" in self._dev_vars and "osc_port" in self._dev_vars:
+            self._status_osc.config(text=f"OSC: {self._dev_vars['osc_host'].get()}:{self._dev_vars['osc_port'].get()}  |  HR: {src}")
+        self.after(1000, self._update_statusbar)
+
     def _show_history(self):
         from datetime import datetime, date
         entries = load_history()
@@ -974,19 +1089,38 @@ class App(tk.Tk):
         self.after(10000, self._check_vrchat)
 
     # ── theme helpers ──────────────────────────────────────────
-    def _redraw_top_gradient(self):
-        c = getattr(self, "_gradient_top", None)
-        if not c:
-            return
-        c.delete("gradient")
+    def _on_body_resize(self, _event=None):
+        c = self._body_canvas
         w = c.winfo_width() or 600
-        h = 48
-        steps = 100
+        h = c.winfo_height() or 400
+        # reposition sidebar (fixed width)
+        sw = self._sidebar_frame.winfo_reqwidth() or 52
+        cw = max(0, w - sw)
+        ch = max(0, h)
+        c.coords(self._sidebar_wid, 0, 0)
+        c.itemconfig(self._sidebar_wid, width=sw, height=ch)
+        c.coords(self._content_wid, sw, 0)
+        c.itemconfig(self._content_wid, width=cw, height=ch)
+        # redraw gradient
+        self._redraw_gradient(w, h)
+
+    def _redraw_gradient(self, w, h):
+        c = self._body_canvas
+        c.delete("gradient")
+        if GRADIENT_MODE == "off":
+            c.create_rectangle(0, 0, w, h, fill=BG_DARK, outline="", tags="gradient")
+            return
+        steps = 80
+        if GRADIENT_MODE == "top":
+            gh = min(h, 48)
+            c.create_rectangle(0, gh, w, h, fill=BG_DARK, outline="", tags="gradient")
+        else:
+            gh = h
         for i in range(steps):
             t = i / steps
             color = _lerp_color(GRADIENT_FROM, GRADIENT_TO, t)
-            y1 = int(h * t)
-            y2 = int(h * (i + 1) / steps)
+            y1 = int(gh * t)
+            y2 = int(gh * (i + 1) / steps)
             c.create_rectangle(0, y1, w, y2, fill=color, outline="", tags="gradient")
         c.tag_lower("gradient")
 
@@ -1031,24 +1165,58 @@ class App(tk.Tk):
 
         grad_frame = tk.Frame(body, bg=BG_CARD)
         grad_frame.pack(fill="x", pady=(4, 0))
-        self._gradient_var = tk.BooleanVar(value=cfg.get("gradient_enabled", False))
-        cb = tk.Checkbutton(grad_frame, text="Gradient Top Bar", variable=self._gradient_var,
-                            bg=BG_CARD, fg=TEXT_WHITE, selectcolor=BG_INPUT,
-                            activebackground=BG_CARD, activeforeground=TEXT_WHITE,
-                            font=("", 8), cursor="hand2")
-        cb.pack(side="left")
+        tk.Label(grad_frame, text="Gradient:", bg=BG_CARD, fg=TEXT_GRAY,
+                 font=("", 8)).pack(side="left")
+        self._gradient_var = tk.StringVar(value=cfg.get("gradient_mode", "off"))
+        for gval, glabel in [("off", "Off"), ("top", "Top Bar"), ("full", "Full BG")]:
+            rb = tk.Radiobutton(grad_frame, text=glabel, variable=self._gradient_var,
+                                value=gval, bg=BG_CARD, fg=TEXT_WHITE, selectcolor=BG_INPUT,
+                                activebackground=BG_CARD, activeforeground=TEXT_WHITE,
+                                font=("", 8), cursor="hand2")
+            rb.pack(side="left", padx=(6, 0))
+        grad_colors = tk.Frame(body, bg=BG_CARD)
+        grad_colors.pack(fill="x", pady=(2, 0))
         self._grad_from_var = tk.StringVar(value=cfg.get("gradient_from", GRADIENT_FROM))
         self._grad_to_var = tk.StringVar(value=cfg.get("gradient_to", GRADIENT_TO))
         for gvar, glabel in ((self._grad_from_var, "From"), (self._grad_to_var, "To")):
-            f = tk.Frame(grad_frame, bg=BG_CARD)
-            f.pack(side="left", padx=(8, 0))
+            f = tk.Frame(grad_colors, bg=BG_CARD)
+            f.pack(side="left", padx=(0, 8))
             btn = tk.Button(f, text="  ", bg=gvar.get(), bd=1, relief="solid",
                             width=2, cursor="hand2")
             btn.pack(side="left")
             btn.config(command=lambda v=gvar, b=btn: self._pick_color(v, b))
             tk.Label(f, text=glabel, bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(3, 0))
+        # preview button
+        preview_btn = tk.Button(grad_colors, text="\U0001f441", width=2,
+                                bg=BG_CARD, fg=TEXT_WHITE, bd=1, relief="solid",
+                                cursor="hand2", command=self._gradient_preview)
+        preview_btn.pack(side="right")
         tk.Label(body, text="Restart to apply theme changes", bg=BG_CARD, fg=TEXT_GRAY,
                  font=("", 7, "italic")).pack(anchor="w", pady=(2, 0))
+
+    def _gradient_preview(self):
+        top = tk.Toplevel(self)
+        top.title("Gradient Preview")
+        top.geometry("300x200")
+        top.configure(bg=BG_DARK)
+        top.resizable(False, False)
+        from_ = self._grad_from_var.get()
+        to_ = self._grad_to_var.get()
+        canvas = tk.Canvas(top, width=280, height=160, highlightthickness=0, bg=from_)
+        canvas.pack(padx=10, pady=(10, 4))
+        steps = 80
+        for i in range(steps):
+            t = i / steps
+            color = _lerp_color(from_, to_, t)
+            y1 = int(160 * t)
+            y2 = int(160 * (i + 1) / steps)
+            canvas.create_rectangle(0, y1, 280, y2, fill=color, outline="")
+        canvas.create_text(140, 80, text="C20  →  VRChat Bridge",
+                           fill="white", font=("", 12, "bold"))
+        info = tk.Label(top, text=f"{from_}  →  {to_}", bg=BG_DARK, fg=TEXT_GRAY, font=("", 8))
+        info.pack()
+        tk.Button(top, text="Close", bg=BG_MID, fg=TEXT_WHITE,
+                  bd=0, cursor="hand2", command=top.destroy).pack(pady=4)
 
     def _write_log(self, msg):
         self.log.config(state="normal")
@@ -1091,7 +1259,7 @@ class App(tk.Tk):
             "color_accent_light": self._color_vars["accent_light"].get(),
             "color_text_white": self._color_vars["text_white"].get(),
             "color_text_gray": self._color_vars["text_gray"].get(),
-            "gradient_enabled": self._gradient_var.get(),
+            "gradient_mode": self._gradient_var.get(),
             "gradient_from": self._grad_from_var.get(),
             "gradient_to": self._grad_to_var.get(),
         }
