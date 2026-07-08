@@ -15,10 +15,17 @@ jobs:
           python-version: "3.12"
 
       - run: pip install bleak python-osc pyinstaller
+      - run: pip install winrt 2>nul || echo "winrt not available, media disabled"
 
+      # Build CLI version
       - run: pyinstaller --onefile --name hr_bridge hr_bridge.py
+
+      # Build GUI version
+      - run: pyinstaller --onefile --name "C20 HR Bridge" --windowed hr_bridge_gui.py
 
       - uses: actions/upload-artifact@v4
         with:
           name: hr_bridge-windows
-          path: dist/hr_bridge.exe
+          path: |
+            dist/hr_bridge.exe
+            dist/C20 HR Bridge.exe
