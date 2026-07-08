@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import platform
-import queue
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext
@@ -13,14 +12,14 @@ from typing import Optional
 from bleak import BleakClient, BleakScanner
 from pythonosc.udp_client import SimpleUDPClient
 
-# ── try media detection ─────────────────────────────────────
+# media detection (Windows only)
 try:
     import winrt.windows.media.control as wmc
     HAS_MEDIA = True
 except ImportError:
     HAS_MEDIA = False
 
-# ── BLE UUIDs ───────────────────────────────────────────────
+# BLE
 BLE_HR_MEASURE = "00002a37-0000-1000-8000-00805f9b34fb"
 BLE_BATTERY = "00002a19-0000-1000-8000-00805f9b34fb"
 BLE_FEE2_OUT = "0000fee2-0000-1000-8000-00805f9b34fb"
@@ -42,12 +41,15 @@ def make_packet(cmd, payload=bytes()):
 
 if HAS_MEDIA:
     async def get_media_info():
-        session = await wmc.GlobalSystemMediaTransportControlsSessionManager.request_async()
-        s = session.get_current_session()
-        if s is None:
+        try:
+            session = await wmc.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            s = session.get_current_session()
+            if s is None:
+                return None
+            info = await s.try_get_media_properties_async()
+            return {"title": info.title, "artist": info.artist}
+        except:
             return None
-        info = await s.try_get_media_properties_async()
-        return {"title": info.title, "artist": info.artist}
 else:
     async def get_media_info():
         return None
@@ -55,39 +57,64 @@ else:
 
 # ── Bridge Engine ───────────────────────────────────────────
 class HRBridge:
-    def __init__(self, address: str, template: str, log_cb, media_enabled: bool):
+    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, status_text=""):
         self.address = address
         self.template = template
         self.log = log_cb
-        self.media_enabled = media_enabled
+        self.show_hr = show_hr
+        self.show_battery = show_battery
+        self.show_media = show_media
+        self.show_status = show_status
+        self.status_text = status_text
         self.osc = SimpleUDPClient("127.0.0.1", 9000)
         self.bpm = 0
         self.battery = 0
         self.running = False
         self.song = ""
         self.artist = ""
-        self._client: Optional[BleakClient] = None
+        self._client = None
 
-    def log_msg(self, msg: str):
+    def log_msg(self, msg):
         self.log(msg)
 
-    def send_osc(self):
-        text = self.template.replace("{bpm}", str(self.bpm)).replace("{battery}", str(self.battery))
-        if self.media_enabled and (self.song or self.artist):
-            sep = " — " if self.song and self.artist else ""
-            media_text = f"{self.song}{sep}{self.artist}".strip()
-            text = text.replace("{song}", media_text).replace("{artist}", self.artist).replace("{title}", self.song)
+    def _build_chatbox(self):
+        if self.show_status and self.status_text.strip():
+            return self.status_text.strip()
+        text = self.template
+        text = text.replace("{bpm}", str(self.bpm))
+        text = text.replace("{battery}", str(self.battery))
+        if self.show_media:
+            media_parts = []
+            if self.song:
+                media_parts.append(self.song)
+            if self.artist:
+                media_parts.append(self.artist)
+            media_str = " — ".join(media_parts) if media_parts else ""
+            text = text.replace("{song}", media_str).replace("{artist}", self.artist).replace("{title}", self.song)
         else:
             text = text.replace("{song}", "").replace("{artist}", "").replace("{title}", "")
-        text = text.strip()
+        return " ".join(text.split()).strip()
+
+    def _log_line(self):
+        parts = []
+        if self.show_hr:
+            parts.append(f"\u2764\ufe0f {self.bpm} BPM")
+        if self.show_battery:
+            parts.append(f"\U0001f50b {self.battery}%")
+        if self.show_media and (self.song or self.artist):
+            parts.append(f"\U0001f3b5 {self.song or self.artist}")
+        self.log_msg("  " + "  ".join(parts))
+
+    def send_osc(self):
+        chat = self._build_chatbox()
         self.osc.send_message("/avatar/parameters/isHRConnected", True)
         self.osc.send_message("/avatar/parameters/HR", int(self.bpm))
         self.osc.send_message("/avatar/parameters/floatHR", min(self.bpm / 255.0, 1.0))
         self.osc.send_message("/avatar/parameters/HRBattery", self.battery)
         self.osc.send_message("/avatar/parameters/HRBatteryFloat", self.battery / 100.0)
-        if text:
-            self.osc.send_message("/chatbox/input", [text, True])
-        self.log_msg(f"❤️ {self.bpm} BPM  🔋 {self.battery}%{'  🎵 ' + media_text if self.media_enabled and (self.song or self.artist) else ''}")
+        if chat:
+            self.osc.send_message("/chatbox/input", [chat, True])
+        self._log_line()
 
     def on_hr(self, _h, data):
         if len(data) < 2:
@@ -108,7 +135,7 @@ class HRBridge:
                 self.bpm = bpm
                 self.send_osc()
 
-    async def _cache_services_linux(self):
+    async def _cache_linux(self):
         proc = await asyncio.create_subprocess_exec(
             "bluetoothctl", "connect", self.address,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
@@ -120,20 +147,20 @@ class HRBridge:
 
     async def run_once(self):
         if IS_LINUX:
-            self.log_msg("🔄 Caching…")
-            await self._cache_services_linux()
-        self.log_msg(f"📡 Connecting to {self.address}…")
+            self.log_msg("\U0001f504 Caching\u2026")
+            await self._cache_linux()
+        self.log_msg(f"\U0001f4e1 Connecting to {self.address}\u2026")
         kwargs = {"timeout": 20.0}
         if IS_LINUX:
             kwargs["dangerous_use_bleak_cache"] = True
         async with BleakClient(self.address, **kwargs) as client:
             self._client = client
-            self.log_msg("  ✅ Connected")
+            self.log_msg("  \u2705 Connected")
             try:
                 batt = await client.read_gatt_char(BLE_BATTERY)
                 self.battery = batt[0]
-                self.log_msg(f"  🔋 {self.battery}%")
-            except Exception:
+                self.log_msg(f"  \U0001f50b {self.battery}%")
+            except:
                 pass
             await client.start_notify(BLE_FEE3_IN, self.on_fee3)
             await client.write_gatt_char(BLE_FEE2_OUT, make_packet(CMD_START_DYNAMIC_HR, bytes([0x00])), response=False)
@@ -144,7 +171,7 @@ class HRBridge:
             await asyncio.sleep(0.2)
             await client.write_gatt_char(BLE_FEE2_OUT, make_packet(CMD_SET_QUICK_VIEW, bytes([0x01])), response=False)
             await client.start_notify(BLE_HR_MEASURE, self.on_hr)
-            self.log_msg("  ✅ Streaming!")
+            self.log_msg("  \u2705 Streaming!")
             last_notify = asyncio.get_event_loop().time()
             last_keepalive = last_notify
             poll_count = 0
@@ -160,12 +187,12 @@ class HRBridge:
                 if poll_count >= 3:
                     await client.write_gatt_char(BLE_FEE2_OUT, make_packet(47, bytes([])), response=False)
                     poll_count = 0
-                if self.media_enabled and HAS_MEDIA and poll_count % 1 == 0:
+                if self.show_media and HAS_MEDIA:
                     media = await get_media_info()
                     if media:
                         self.song = media.get("title", "")
                         self.artist = media.get("artist", "")
-            self.log_msg("  ⚠️ Disconnected")
+            self.log_msg("  \u26a0\ufe0f Disconnected")
 
     async def run_forever(self):
         while self.running:
@@ -174,9 +201,9 @@ class HRBridge:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.log_msg(f"  ⚠️ {e}")
+                self.log_msg(f"  \u26a0\ufe0f {e}")
             if self.running:
-                self.log_msg("  🔄 Reconnecting in 5s…")
+                self.log_msg("  \U0001f504 Reconnecting in 5s\u2026")
                 await asyncio.sleep(5)
 
     def start(self):
@@ -187,20 +214,17 @@ class HRBridge:
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self.run_forever())
-        except Exception as e:
-            self.log_msg(f"  ❌ {e}")
+        self._loop.run_until_complete(self.run_forever())
 
     def stop(self):
         self.running = False
         if self._client and self._client.is_connected:
             asyncio.run_coroutine_threadsafe(self._client.disconnect(), self._loop)
         self._loop.call_soon_threadsafe(self._loop.stop)
-        self.log_msg("  ⏹️ Stopped")
+        self.log_msg("  \u23f9\ufe0f Stopped")
 
 
-# ── Settings Persistence ────────────────────────────────────
+# ── Config ──────────────────────────────────────────────────
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_config.json")
 
 def load_config():
@@ -216,87 +240,127 @@ def save_config(data):
 
 
 # ── GUI ─────────────────────────────────────────────────────
-class BridgeGUI:
-    def __init__(self):
-        self.root = tk.Tk()
+class App(ttk.Frame):
+    def __init__(self, root):
+        super().__init__(root, padding=12)
+        self.root = root
         self.root.title("C20 HR Bridge")
         self.root.resizable(False, False)
-        self.bridge: Optional[HRBridge] = None
+        self.bridge = None
         cfg = load_config()
-        self._build_ui(cfg)
+        self._build(cfg)
+        self.grid()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _build_ui(self, cfg):
-        main = ttk.Frame(self.root, padding=12)
-        main.grid()
+    # ── build ────────────────────────────────────────────────
+    def _build(self, cfg):
+        # title
+        ttk.Label(self, text="C20 \u2192 VRChat Heart Rate Bridge", font=("", 11, "bold")).grid(row=0, column=0, columnspan=3, pady=(0, 8))
 
-        # Address
-        ttk.Label(main, text="Watch Address:").grid(row=0, column=0, sticky="w")
-        self.addr_var = tk.StringVar(value=cfg.get("address", DEFAULT_ADDR))
-        ttk.Entry(main, textvariable=self.addr_var, width=20).grid(row=0, column=1, padx=6, pady=3, sticky="ew")
+        # ── address row ──
+        ttk.Label(self, text="Watch Address:").grid(row=1, column=0, sticky="w", pady=2)
+        self.addr = tk.StringVar(value=cfg.get("address", DEFAULT_ADDR))
+        ttk.Entry(self, textvariable=self.addr, width=22).grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=2)
 
-        # Template
-        ttk.Label(main, text="Chatbox Format:").grid(row=1, column=0, sticky="w")
-        self.template_var = tk.StringVar(value=cfg.get("template", DEFAULT_TEMPLATE))
-        ttk.Entry(main, textvariable=self.template_var, width=40).grid(row=1, column=1, padx=6, pady=3, sticky="ew")
-        ttk.Label(main, text="Placeholders: {bpm} {battery} {song} {artist} {title}", font=("", 8)).grid(row=2, column=1, sticky="w")
+        # ── toggles ──
+        toggles = ttk.LabelFrame(self, text="Features", padding=8)
+        toggles.grid(row=2, column=0, columnspan=3, sticky="ew", pady=6)
 
-        # Media toggle
-        self.media_var = tk.BooleanVar(value=cfg.get("media", False))
-        ttk.Checkbutton(main, text="Show media info ({song}/{artist})", variable=self.media_var).grid(row=3, column=1, sticky="w", pady=3)
+        self.chk_hr = tk.BooleanVar(value=cfg.get("hr", True))
+        ttk.Checkbutton(toggles, text="Heart Rate", variable=self.chk_hr).grid(row=0, column=0, sticky="w", padx=4)
+
+        self.chk_batt = tk.BooleanVar(value=cfg.get("battery", True))
+        ttk.Checkbutton(toggles, text="Battery", variable=self.chk_batt).grid(row=0, column=1, sticky="w", padx=4)
+
+        self.chk_media = tk.BooleanVar(value=cfg.get("media", False))
+        ttk.Checkbutton(toggles, text="Media Info", variable=self.chk_media).grid(row=0, column=2, sticky="w", padx=4)
         if not HAS_MEDIA:
-            ttk.Label(main, text="  (Windows only)", font=("", 8), foreground="gray").grid(row=3, column=1, sticky="e")
+            ttk.Label(toggles, text="(Win only)", font=("", 8), foreground="gray").grid(row=0, column=3, padx=(0, 4))
 
-        # Start/stop
-        btn_frame = ttk.Frame(main)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=8)
-        self.start_btn = ttk.Button(btn_frame, text="▶ Start", command=self._toggle)
-        self.start_btn.pack(side="left", padx=4)
+        self.chk_egg = tk.BooleanVar(value=cfg.get("egg", False))
+        ttk.Checkbutton(toggles, text="Egg Mode", variable=self.chk_egg, command=self._on_egg_toggle).grid(row=0, column=4, sticky="w", padx=4)
 
-        # Log
-        self.log_area = scrolledtext.ScrolledText(main, width=60, height=16, font=("Consolas", 9))
-        self.log_area.grid(row=5, column=0, columnspan=2)
-        self.log_area.insert("end", "Ready. Press Start to begin.\n")
-        self.log_area.see("end")
+        # ── egg text / template ──
+        self.egg_frame = ttk.Frame(self)
+        self.egg_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(self.egg_frame, text="Egg Text:", font=("", 8)).grid(row=0, column=0, sticky="w")
+        self.egg_txt = tk.StringVar(value=cfg.get("egg_text", ""))
+        ttk.Entry(self.egg_frame, textvariable=self.egg_txt, width=40).grid(row=0, column=1, padx=6, sticky="ew")
+        ttk.Label(self.egg_frame, text="(short = tiny chatbox)", font=("", 7), foreground="gray").grid(row=0, column=2, padx=(0, 4))
 
-        # Placeholders hint
-        ttk.Label(main, text="Tip: Templates support {bpm}, {battery}, {song}, {artist}, {title}", font=("", 8), foreground="gray").grid(row=6, column=0, columnspan=2, pady=2)
+        self.template_frame = ttk.Frame(self)
+        self.template_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(self.template_frame, text="Chatbox Format:", font=("", 8)).grid(row=0, column=0, sticky="w")
+        self.template = tk.StringVar(value=cfg.get("template", DEFAULT_TEMPLATE))
+        ttk.Entry(self.template_frame, textvariable=self.template, width=40).grid(row=0, column=1, padx=6, sticky="ew")
 
-    def log(self, msg: str):
-        self.root.after(0, self._do_log, msg)
+        # placeholder hint
+        ttk.Label(self, text="Placeholders: {bpm} {battery} {song} {artist} {title}", font=("", 7), foreground="gray").grid(row=5, column=0, columnspan=3, sticky="w")
+        self._on_egg_toggle()
 
-    def _do_log(self, msg: str):
-        self.log_area.insert("end", msg + "\n")
-        self.log_area.see("end")
+        # ── start/stop ──
+        btn_row = ttk.Frame(self)
+        btn_row.grid(row=6, column=0, columnspan=3, pady=8)
+        self.btn = ttk.Button(btn_row, text="\u25b6 Start", command=self._toggle)
+        self.btn.pack(side="left", padx=4)
 
+        # ── log ──
+        self.log = scrolledtext.ScrolledText(self, width=62, height=14, font=("Consolas", 9))
+        self.log.grid(row=7, column=0, columnspan=3)
+        self.log.insert("end", "Ready \u2014 press Start to begin.\n")
+        self.log.see("end")
+
+    def _on_egg_toggle(self):
+        mode = self.chk_egg.get()
+        for child in self.egg_frame.winfo_children():
+            child.configure(state="normal" if mode else "disabled")
+        for child in self.template_frame.winfo_children():
+            child.configure(state="disabled" if mode else "normal")
+
+    # ── logging ──────────────────────────────────────────────
+    def write_log(self, msg):
+        self.root.after(0, self._insert_log, msg)
+
+    def _insert_log(self, msg):
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+
+    # ── toggle ───────────────────────────────────────────────
     def _toggle(self):
         if self.bridge and self.bridge.running:
             self.bridge.stop()
-            self.start_btn.config(text="▶ Start")
+            self.btn.config(text="\u25b6 Start")
             save_config({
-                "address": self.addr_var.get(),
-                "template": self.template_var.get(),
-                "media": self.media_var.get(),
+                "address": self.addr.get(),
+                "template": self.template.get(),
+                "hr": self.chk_hr.get(),
+                "battery": self.chk_batt.get(),
+                "media": self.chk_media.get(),
+                "egg": self.chk_egg.get(),
+                "egg_text": self.egg_txt.get(),
             })
         else:
-            self.log_area.delete("1.0", "end")
+            self.log.delete("1.0", "end")
             self.bridge = HRBridge(
-                address=self.addr_var.get(),
-                template=self.template_var.get(),
-                log_cb=self.log,
-                media_enabled=self.media_var.get(),
+                address=self.addr.get(),
+                template=self.template.get(),
+                log_cb=self.write_log,
+                show_hr=self.chk_hr.get(),
+                show_battery=self.chk_batt.get(),
+                show_media=self.chk_media.get(),
+                show_status=self.chk_egg.get(),
+                status_text=self.egg_txt.get(),
             )
             self.bridge.start()
-            self.start_btn.config(text="■ Stop")
+            self.btn.config(text="\u25a0 Stop")
 
     def _on_close(self):
         if self.bridge and self.bridge.running:
             self.bridge.stop()
         self.root.destroy()
 
-    def run(self):
-        self.root.mainloop()
-
 
 if __name__ == "__main__":
-    BridgeGUI().run()
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
