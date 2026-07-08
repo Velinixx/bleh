@@ -119,16 +119,15 @@ class HRBridge:
 
             # Initialize MOYOUNG protocol on FEE2/FEE3
             await client.start_notify(BLE_FEE3_IN, self.on_fee3)
-            await client.write_gatt_char(
-                BLE_FEE2_OUT, make_packet(CMD_START_DYNAMIC_HR, bytes([0x00])), response=False
-            )
-            await asyncio.sleep(0.3)
-            await client.write_gatt_char(
-                BLE_FEE2_OUT, make_packet(CMD_SET_HR_INTERVAL, bytes([0x01])), response=False
-            )
-            await client.write_gatt_char(
-                BLE_FEE2_OUT, make_packet(CMD_TRIGGER_HR, bytes([0x00])), response=False
-            )
+            # Enable continuous HR
+            await client.write_gatt_char(BLE_FEE2_OUT, make_packet(CMD_START_DYNAMIC_HR, bytes([0x00])), response=False)
+            await asyncio.sleep(0.2)
+            await client.write_gatt_char(BLE_FEE2_OUT, make_packet(CMD_SET_HR_INTERVAL, bytes([0x01])), response=False)
+            await asyncio.sleep(0.2)
+            await client.write_gatt_char(BLE_FEE2_OUT, make_packet(CMD_TRIGGER_HR, bytes([0x00])), response=False)
+            await asyncio.sleep(0.2)
+            # Enable raise-to-wake so arm movement keeps watch awake
+            await client.write_gatt_char(BLE_FEE2_OUT, make_packet(24, bytes([0x01])), response=False)
             print(f"  ✅ MOYOUNG initialized", flush=True)
 
             # Subscribe to standard BLE Heart Rate notifications
@@ -138,6 +137,7 @@ class HRBridge:
 
             self.last_notify = asyncio.get_event_loop().time()
             last_keepalive = self.last_notify
+            keepalive_count = 0
             while client.is_connected:
                 await asyncio.sleep(POLL_SECONDS)
                 now = asyncio.get_event_loop().time()
@@ -150,6 +150,13 @@ class HRBridge:
                         BLE_FEE2_OUT, make_packet(CMD_START_DYNAMIC_HR, bytes([0x00])), response=False
                     )
                     last_keepalive = now
+                # Keep BLE channel busy - send a no-op query every 10s
+                keepalive_count += 1
+                if keepalive_count >= 3:
+                    await client.write_gatt_char(
+                        BLE_FEE2_OUT, make_packet(47, bytes([])), response=False
+                    )
+                    keepalive_count = 0
 
     async def run_forever(self):
         while True:
