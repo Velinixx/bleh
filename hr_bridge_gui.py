@@ -6,7 +6,7 @@ import os
 import platform
 import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, colorchooser as tkc
 from typing import Optional
 
 from bleak import BleakClient, BleakScanner
@@ -355,6 +355,34 @@ TEXT_WHITE  = "#f0eefe"
 TEXT_GRAY   = "#a8a0c8"
 SUCCESS     = "#4ade80"
 DANGER      = "#ef4444"
+GRADIENT_ENABLED = False
+GRADIENT_FROM = "#1a1a2e"
+GRADIENT_TO   = "#7c5cbf"
+
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+def _rgb_to_hex(r, g, b):
+    return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+
+def _lerp_color(a, b, t):
+    ar, ag, ab = _hex_to_rgb(a)
+    br, bg, bb = _hex_to_rgb(b)
+    return _rgb_to_hex(ar + (br - ar) * t, ag + (bg - ag) * t, ab + (bb - ab) * t)
+
+def apply_palette(cfg):
+    global BG_DARK, BG_MID, BG_CARD, BG_INPUT, ACCENT, ACCENT_LIGHT, TEXT_WHITE, TEXT_GRAY, GRADIENT_ENABLED, GRADIENT_FROM, GRADIENT_TO
+    m = {"bg_dark": "BG_DARK", "bg_mid": "BG_MID", "bg_card": "BG_CARD", "bg_input": "BG_INPUT",
+         "accent": "ACCENT", "accent_light": "ACCENT_LIGHT", "text_white": "TEXT_WHITE", "text_gray": "TEXT_GRAY"}
+    for key, gname in m.items():
+        val = cfg.get(f"color_{key}")
+        if val:
+            globals()[gname] = val
+    if cfg.get("gradient_enabled", False):
+        GRADIENT_ENABLED = True
+        GRADIENT_FROM = cfg.get("gradient_from", GRADIENT_FROM)
+        GRADIENT_TO = cfg.get("gradient_to", GRADIENT_TO)
 
 def setup_style():
     style = ttk.Style()
@@ -389,6 +417,9 @@ class Page(tk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        cfg = load_config()
+        apply_palette(cfg)
+
         self.title("C20 HR Bridge")
         self.configure(bg=BG_DARK)
         self.minsize(520, 400)
@@ -396,13 +427,21 @@ class App(tk.Tk):
 
         self.bridge = None
         self.egg_dev = False
-        cfg = load_config()
 
-        # ── top bar ──────────────────────────────────────────
-        top = tk.Frame(self, bg=BG_MID, height=48)
-        top.pack(fill="x")
-        top.pack_propagate(False)
-        tk.Label(top, text="C20  →  VRChat Bridge", bg=BG_MID, fg=ACCENT_LIGHT, font=("", 11, "bold")).pack(side="left", padx=14, pady=10)
+        # ── top bar (with optional gradient) ─────────────────
+        if GRADIENT_ENABLED:
+            top = tk.Canvas(self, height=48, highlightthickness=0)
+            top.pack(fill="x")
+            self._gradient_top = top
+            self.after(20, lambda: self._redraw_top_gradient())
+            top.create_text(14, 26, text="C20  →  VRChat Bridge",
+                            fill=ACCENT_LIGHT, font=("", 11, "bold"), anchor="w")
+        else:
+            top = tk.Frame(self, bg=BG_MID, height=48)
+            top.pack(fill="x")
+            top.pack_propagate(False)
+            tk.Label(top, text="C20  →  VRChat Bridge", bg=BG_MID,
+                     fg=ACCENT_LIGHT, font=("", 11, "bold")).pack(side="left", padx=14, pady=10)
 
         # ── body: sidebar + content ──────────────────────────
         body = tk.Frame(self, bg=BG_DARK)
@@ -613,6 +652,8 @@ class App(tk.Tk):
                               cursor="hand2", command=self._reset_extremes)
         reset_btn.pack(anchor="w", pady=(6, 0))
 
+        self._theme_card(page, cfg)
+
     # ── page: log ─────────────────────────────────────────────
     def _build_log_page(self, page):
         card = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
@@ -698,6 +739,94 @@ class App(tk.Tk):
         self._egg_entry.configure(state=state)
         self._template_entry.configure(state="disabled" if mode else "normal")
 
+    # ── theme helpers ──────────────────────────────────────────
+    def _redraw_top_gradient(self):
+        c = getattr(self, "_gradient_top", None)
+        if not c:
+            return
+        c.delete("gradient")
+        w = c.winfo_width() or 600
+        h = 48
+        steps = 100
+        for i in range(steps):
+            t = i / steps
+            color = _lerp_color(GRADIENT_FROM, GRADIENT_TO, t)
+            y1 = int(h * t)
+            y2 = int(h * (i + 1) / steps)
+            c.create_rectangle(0, y1, w, y2, fill=color, outline="", tags="gradient")
+        c.tag_lower("gradient")
+
+    def _pick_color(self, var, btn):
+        hex_color = var.get()
+        result = tkc.askcolor(color=hex_color, title="Pick a color", parent=self)
+        if result and result[1]:
+            var.set(result[1])
+            btn.configure(bg=result[1])
+
+    def _theme_card(self, page, cfg):
+        card = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
+        card.pack(fill="x", pady=(6, 0))
+        tk.Label(card, text="\U0001f3a8  Theme", bg=BG_CARD, fg=ACCENT_LIGHT, font=("", 9, "bold"), anchor="w").pack(fill="x")
+
+        body = tk.Frame(card, bg=BG_CARD)
+        body.pack(fill="x", pady=(4, 0))
+
+        # color entries
+        color_keys = [
+            ("bg_dark",     "Background"),
+            ("bg_mid",      "Mid BG"),
+            ("bg_card",     "Card"),
+            ("bg_input",    "Input"),
+            ("accent",      "Accent"),
+            ("accent_light","Accent Lt"),
+            ("text_white",  "Text"),
+            ("text_gray",   "Text Dim"),
+        ]
+        fallback = {"bg_dark": BG_DARK, "bg_mid": BG_MID, "bg_card": BG_CARD, "bg_input": BG_INPUT,
+                     "accent": ACCENT, "accent_light": ACCENT_LIGHT, "text_white": TEXT_WHITE, "text_gray": TEXT_GRAY}
+        self._color_vars = {}
+        for col, (cfg_key, label) in enumerate(color_keys):
+            var = tk.StringVar(value=cfg.get(f"color_{cfg_key}", fallback[cfg_key]))
+            self._color_vars[cfg_key] = var
+            f = tk.Frame(body, bg=BG_CARD)
+            f.grid(row=0, column=col, padx=(0, 8), sticky="w")
+            btn = tk.Button(f, text="  ", bg=var.get(), bd=1, relief="solid",
+                            width=3, cursor="hand2", command=lambda: None)
+            btn.pack(side="left")
+            tk.Label(f, text=label, bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(3, 0))
+        # wire button commands (capture var+btn correctly)
+        for col, (cfg_key, _) in enumerate(color_keys):
+            var = self._color_vars[cfg_key]
+            f = body.grid_slaves(row=0, column=idx)[0]
+            btn = f.winfo_children()[0]
+            btn.config(command=lambda v=var, b=btn: self._pick_color(v, b))
+
+        # gradient section
+        grad_frame = tk.Frame(card, bg=BG_CARD)
+        grad_frame.pack(fill="x", pady=(4, 0))
+
+        self._gradient_var = tk.BooleanVar(value=cfg.get("gradient_enabled", False))
+        cb = tk.Checkbutton(grad_frame, text="Gradient Top Bar", variable=self._gradient_var,
+                            bg=BG_CARD, fg=TEXT_WHITE, selectcolor=BG_INPUT,
+                            activebackground=BG_CARD, activeforeground=TEXT_WHITE,
+                            font=("", 8), cursor="hand2")
+        cb.pack(side="left")
+
+        self._grad_from_var = tk.StringVar(value=cfg.get("gradient_from", GRADIENT_FROM))
+        self._grad_to_var = tk.StringVar(value=cfg.get("gradient_to", GRADIENT_TO))
+
+        for gvar, glabel in ((self._grad_from_var, "From"), (self._grad_to_var, "To")):
+            f = tk.Frame(grad_frame, bg=BG_CARD)
+            f.pack(side="left", padx=(8, 0))
+            btn = tk.Button(f, text="  ", bg=gvar.get(), bd=1, relief="solid",
+                            width=2, cursor="hand2")
+            btn.pack(side="left")
+            btn.config(command=lambda v=gvar, b=btn: self._pick_color(v, b))
+            tk.Label(f, text=glabel, bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(3, 0))
+
+        tk.Label(card, text="Restart to apply theme changes", bg=BG_CARD, fg=TEXT_GRAY,
+                 font=("", 7, "italic")).pack(anchor="w", pady=(2, 0))
+
     def _write_log(self, msg):
         self.log.config(state="normal")
         self.log.insert("end", msg + "\n")
@@ -731,6 +860,17 @@ class App(tk.Tk):
                 "keepalive_interval": self._dev_vars["keepalive_interval"].get() if self.egg_dev else 30,
                 "osc_host": self._dev_vars["osc_host"].get() if self.egg_dev else "127.0.0.1",
                 "osc_port": self._dev_vars["osc_port"].get() if self.egg_dev else 9000,
+                "color_bg_dark": self._color_vars["bg_dark"].get(),
+                "color_bg_mid": self._color_vars["bg_mid"].get(),
+                "color_bg_card": self._color_vars["bg_card"].get(),
+                "color_bg_input": self._color_vars["bg_input"].get(),
+                "color_accent": self._color_vars["accent"].get(),
+                "color_accent_light": self._color_vars["accent_light"].get(),
+                "color_text_white": self._color_vars["text_white"].get(),
+                "color_text_gray": self._color_vars["text_gray"].get(),
+                "gradient_enabled": self._gradient_var.get(),
+                "gradient_from": self._grad_from_var.get(),
+                "gradient_to": self._grad_to_var.get(),
             })
         else:
             self.log.config(state="normal")
