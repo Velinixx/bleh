@@ -414,6 +414,69 @@ class Page(tk.Frame):
         super().__init__(parent, bg=BG_DARK, **kw)
 
 
+class CollapsibleCard(tk.Frame):
+    """A card with a clickable header that toggles visibility of the body."""
+    def __init__(self, parent, title, collapsed=False, expand=False):
+        super().__init__(parent, bg=BG_CARD, padx=10, pady=8)
+        self._collapsed = collapsed
+        hdr = tk.Frame(self, bg=BG_CARD)
+        hdr.pack(fill="x")
+        arrow = "\u25b6" if collapsed else "\u25bc"
+        self.arrow_lbl = tk.Label(hdr, text=arrow, bg=BG_CARD, fg=TEXT_GRAY,
+                                  font=("", 8), cursor="hand2")
+        self.arrow_lbl.pack(side="left")
+        title_lbl = tk.Label(hdr, text=title, bg=BG_CARD, fg=ACCENT_LIGHT,
+                             font=("", 9, "bold"), anchor="w", cursor="hand2")
+        title_lbl.pack(side="left", padx=(4, 0))
+        for w in (hdr, self.arrow_lbl, title_lbl):
+            w.bind("<Button-1>", lambda e: self._toggle())
+        self.body = tk.Frame(self, bg=BG_CARD)
+        if not collapsed:
+            kw = {"fill": "both", "expand": True, "pady": (6, 0)} if expand else {"fill": "x", "pady": (6, 0)}
+            self.body.pack(**kw)
+
+    def _toggle(self):
+        if self._collapsed:
+            self.body.pack(fill="x", pady=(6, 0))
+            self.arrow_lbl.config(text="\u25bc")
+        else:
+            self.body.pack_forget()
+            self.arrow_lbl.config(text="\u25b6")
+        self._collapsed = not self._collapsed
+
+
+class ToolTip:
+    """Hover tooltip for any widget."""
+    def __init__(self, widget, text, delay=400):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._id = None
+        self._tw = None
+        widget.bind("<Enter>", self._schedule)
+        widget.bind("<Leave>", self._hide)
+
+    def _schedule(self, event=None):
+        self._id = self.widget.after(self.delay, self._show)
+
+    def _show(self):
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self._tw = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self.text, justify="left", bg="#2d2b55", fg="#f0eefe",
+                 font=("", 8), padx=8, pady=5).pack()
+
+    def _hide(self, event=None):
+        if self._id:
+            self.widget.after_cancel(self._id)
+            self._id = None
+        if self._tw:
+            self._tw.destroy()
+            self._tw = None
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -509,9 +572,17 @@ class App(tk.Tk):
             btn.config(bg=BG_CARD if i == idx else BG_MID, fg=ACCENT_LIGHT if i == idx else TEXT_GRAY)
 
     def _card(self, parent, text):
-        f = tk.Frame(parent, bg=BG_CARD, padx=10, pady=8)
-        tk.Label(f, text=text, bg=BG_CARD, fg=ACCENT_LIGHT, font=("", 9, "bold"), anchor="w").pack(fill="x")
-        return f
+        c = CollapsibleCard(parent, text)
+        c.pack(fill="x", pady=(0, 6))
+        return c.body
+
+    def _qbtn(self, parent, text):
+        """Add a ? label with a hover tooltip."""
+        lbl = tk.Label(parent, text="?", bg=parent.cget("bg") or BG_CARD,
+                       fg=TEXT_GRAY, font=("", 7, "bold"), cursor="question_arrow")
+        lbl.pack(side="left", padx=(2, 0))
+        ToolTip(lbl, text)
+        return lbl
 
     # ── page: status ──────────────────────────────────────────
     def _build_status_page(self, page, cfg):
@@ -520,6 +591,7 @@ class App(tk.Tk):
         addr_row = tk.Frame(card, bg=BG_CARD)
         addr_row.pack(fill="x", pady=(6, 0))
         tk.Label(addr_row, text="BLE Address", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self._qbtn(addr_row, "Watch Bluetooth MAC address\nExample: 96:D6:AF:D0:2B:6E\nTap watch screen first to wake it")
         self.addr = tk.StringVar(value=cfg.get("address", DEFAULT_ADDR))
         tk.Entry(addr_row, textvariable=self.addr, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                  bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=24).pack(side="right")
@@ -530,8 +602,11 @@ class App(tk.Tk):
         self._template_entry = tk.Entry(card2, textvariable=self.template, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                                         bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=44)
         self._template_entry.pack(fill="x", pady=(6, 2))
-        tk.Label(card2, text="{bpm} {hr_min} {hr_max} {battery} {song} {artist} {title}",
-                 bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(anchor="w")
+        vars_row = tk.Frame(card2, bg=BG_CARD)
+        vars_row.pack(fill="x")
+        tk.Label(vars_row, text="{bpm} {hr_min} {hr_max} {battery} {song} {artist} {title}",
+                 bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left")
+        self._qbtn(vars_row, "Variables you can use:\n{bpm} - heart rate\n{hr_min} / {hr_max} - min/max\n{battery} - battery %\n{song} / {artist} / {title} - media\nExample: ❤ {bpm} BPM | 🔋 {battery}%")
 
         # egg mode
         self.egg_frame = tk.Frame(page, bg=BG_DARK)
@@ -541,7 +616,7 @@ class App(tk.Tk):
                                    insertbackground=TEXT_WHITE, bd=0, highlightthickness=1,
                                    highlightbackground=BG_MID, highlightcolor=ACCENT, width=44)
         self._egg_entry.pack(side="left", padx=(0, 6))
-        self._egg_entry.bind("<KeyRelease>", self._check_blank_egg)
+        self._qbtn(self.egg_frame, "Custom short text for Egg Mode\nReplaces the template entirely\nSent as-is to chatbox")
         tk.Label(self.egg_frame, text="Egg text", bg=BG_DARK, fg=TEXT_GRAY, font=("", 7)).pack(side="left")
 
         # start / stop
@@ -558,29 +633,28 @@ class App(tk.Tk):
 
     # ── page: features ────────────────────────────────────────
     def _build_features_page(self, page, cfg):
-        card = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
-        card.pack(fill="x")
-        tk.Label(card, text="Toggles", bg=BG_CARD, fg=ACCENT_LIGHT, font=("", 9, "bold"), anchor="w").pack(fill="x")
-
-        body = tk.Frame(card, bg=BG_CARD)
-        body.pack(fill="x", pady=(6, 0))
+        toggles_card = CollapsibleCard(page, "Toggles")
+        body = toggles_card.body
 
         toggles_data = [
-            ("\u2764  Heart Rate", "hr", True),
-            ("\U0001f50b  Battery", "battery", True),
-            ("\U0001f3b5  Media Info", "media", False),
-            ("\U0001f7e2  Min / Max HR", "extremes", True),
-            ("\U0001f95a  Egg Mode", "egg", False),
+            ("\u2764  Heart Rate", "hr", True, "Stream heart rate to VRChat\nOSC: /avatar/parameters/HR"),
+            ("\U0001f50b  Battery", "battery", True, "Stream watch battery level\nOSC: /avatar/parameters/HRBattery"),
+            ("\U0001f3b5  Media Info", "media", False, "Stream current song info\nSources: winrt (Windows) / Pear Desktop"),
+            ("\U0001f7e2  Min / Max HR", "extremes", True, "Track min & max heart rate\nauto-resets on reconnection"),
+            ("\U0001f95a  Egg Mode", "egg", False, "Replace template with custom\nshort text (chatbox pillar style)"),
         ]
         self._toggles_vars = {}
-        for i, (label, key, default) in enumerate(toggles_data):
+        for i, (label, key, default, tip) in enumerate(toggles_data):
             var = tk.BooleanVar(value=cfg.get(key, default))
             self._toggles_vars[key] = var
-            cb = tk.Checkbutton(body, text=label, variable=var,
+            f = tk.Frame(body, bg=BG_CARD)
+            f.pack(side="left", padx=(0, 8), pady=2)
+            cb = tk.Checkbutton(f, text=label, variable=var,
                                 bg=BG_CARD, fg=TEXT_WHITE, selectcolor=BG_INPUT,
                                 activebackground=BG_CARD, activeforeground=TEXT_WHITE,
                                 font=("", 9), cursor="hand2")
-            cb.pack(side="left", padx=(0, 12), pady=2)
+            cb.pack(side="left")
+            self._qbtn(f, tip)
             if key == "egg":
                 cb.config(command=self._on_egg_toggle)
 
@@ -591,9 +665,10 @@ class App(tk.Tk):
         self.chk_egg = self._toggles_vars["egg"]
 
         # media source
-        src_row = tk.Frame(card, bg=BG_CARD)
+        src_row = tk.Frame(body, bg=BG_CARD)
         src_row.pack(fill="x", pady=(4, 0))
         tk.Label(src_row, text="Media Source:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self._qbtn(src_row, "Source for media info\nnone = off\nwinrt = Windows Runtime (Windows only)\npear = Pear Desktop API")
         self.media_source = tk.StringVar(value=cfg.get("media_source", "none"))
         sources = ["none", "winrt", "pear"]
         src_menu = tk.OptionMenu(src_row, self.media_source, *sources)
@@ -603,6 +678,7 @@ class App(tk.Tk):
 
         # pear port
         tk.Label(src_row, text="Port:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left", padx=(10, 0))
+        self._qbtn(src_row, "Pear Desktop API port\nDefault: 26538")
         self.pear_port = tk.IntVar(value=cfg.get("pear_port", PEAR_DEFAULT_PORT))
         tk.Spinbox(src_row, from_=1024, to=65535, textvariable=self.pear_port, width=6,
                    bg=BG_INPUT, fg=TEXT_WHITE, bd=0, highlightthickness=1,
@@ -611,15 +687,19 @@ class App(tk.Tk):
         if not HAS_WINRT:
             tk.Label(src_row, text="(winrt unavailable)", bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(6, 0))
 
-        # ── HR source ───────────────────────────────────────────
-        hr_card = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
-        hr_card.pack(fill="x", pady=(6, 0))
-        tk.Label(hr_card, text="Heart Rate Source", bg=BG_CARD, fg=ACCENT_LIGHT, font=("", 9, "bold"), anchor="w").pack(fill="x")
+        # reset extremes
+        reset_btn = tk.Button(body, text="Reset Min/Max", font=("", 8),
+                              bg=BG_MID, fg=TEXT_GRAY, bd=0, padx=10, pady=2,
+                              activebackground=BG_CARD, activeforeground=ACCENT_LIGHT,
+                              cursor="hand2", command=self._reset_extremes)
+        reset_btn.pack(anchor="w", pady=(6, 0))
 
-        hr_body = tk.Frame(hr_card, bg=BG_CARD)
-        hr_body.pack(fill="x", pady=(6, 0))
+        # ── HR source ───────────────────────────────────────────
+        hr_card = CollapsibleCard(page, "Heart Rate Source")
+        hr_body = hr_card.body
 
         tk.Label(hr_body, text="Source:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self._qbtn(hr_body, "Heart rate source\nble = C20 watch via Bluetooth\nhyperate = HypeRate.io WebSocket")
         self.hr_source = tk.StringVar(value=cfg.get("hr_source", "ble"))
         self.hr_source.trace_add("write", self._toggle_hr_fields)
         hr_sources = ["ble"] + (["hyperate"] if HAS_WS else [])
@@ -629,28 +709,23 @@ class App(tk.Tk):
         hr_menu.pack(side="left", padx=(6, 0))
 
         # HypeRate fields (hidden when BLE selected)
-        self.hr_id_frame = tk.Frame(hr_card, bg=BG_CARD)
+        self.hr_id_frame = tk.Frame(hr_body, bg=BG_CARD)
         self.hr_id_frame.pack(fill="x", pady=(2, 0))
         tk.Label(self.hr_id_frame, text="Device ID:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self._qbtn(self.hr_id_frame, "HypeRate device ID\nget from hyperate.io dashboard")
         self.hyperate_id = tk.StringVar(value=cfg.get("hyperate_id", ""))
         tk.Entry(self.hr_id_frame, textvariable=self.hyperate_id, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                  bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=18).pack(side="left", padx=(4, 0))
 
-        self.hr_key_frame = tk.Frame(hr_card, bg=BG_CARD)
+        self.hr_key_frame = tk.Frame(hr_body, bg=BG_CARD)
         self.hr_key_frame.pack(fill="x", pady=(2, 0))
         tk.Label(self.hr_key_frame, text="API Key:", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+        self._qbtn(self.hr_key_frame, "HypeRate API key\nget from hyperate.io/api")
         self.hyperate_key = tk.StringVar(value=cfg.get("hyperate_key", ""))
         tk.Entry(self.hr_key_frame, textvariable=self.hyperate_key, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                  bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=28, show="*").pack(side="left", padx=(4, 0))
 
         self._toggle_hr_fields()
-
-        # reset extremes
-        reset_btn = tk.Button(card, text="Reset Min/Max", font=("", 8),
-                              bg=BG_MID, fg=TEXT_GRAY, bd=0, padx=10, pady=2,
-                              activebackground=BG_CARD, activeforeground=ACCENT_LIGHT,
-                              cursor="hand2", command=self._reset_extremes)
-        reset_btn.pack(anchor="w", pady=(6, 0))
 
         self._theme_card(page, cfg)
 
@@ -679,14 +754,17 @@ class App(tk.Tk):
         grid.pack(fill="x", pady=(4, 0))
 
         fields = [
-            ("Poll (s)", "poll_interval", 3),
-            ("Keepalive (s)", "keepalive_interval", 30),
-            ("OSC Host", "osc_host", "127.0.0.1"),
-            ("Port", "osc_port", 9000),
+            ("Poll (s)", "poll_interval", 3, "How often to read the watch (seconds)"),
+            ("Keepalive (s)", "keepalive_interval", 30, "How often to send keepalive (seconds)"),
+            ("OSC Host", "osc_host", "127.0.0.1", "VRChat OSC host IP\nDefault: 127.0.0.1"),
+            ("Port", "osc_port", 9000, "VRChat OSC port\nDefault: 9000"),
         ]
         self._dev_vars = {}
-        for i, (label, key, default) in enumerate(fields):
-            tk.Label(grid, text=label, bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).grid(row=i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 4))
+        for i, (label, key, default, tip) in enumerate(fields):
+            f = tk.Frame(grid, bg=BG_CARD)
+            f.grid(row=i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 4))
+            tk.Label(f, text=label, bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
+            self._qbtn(f, tip)
             if isinstance(default, int):
                 var = tk.IntVar(value=cfg.get(key, default))
                 w = tk.Spinbox(grid, from_=5 if "keepalive" in key else 1,
@@ -764,26 +842,17 @@ class App(tk.Tk):
             btn.configure(bg=result[1])
 
     def _theme_card(self, page, cfg):
-        card = tk.Frame(page, bg=BG_CARD, padx=10, pady=8)
-        card.pack(fill="x", pady=(6, 0))
-        tk.Label(card, text="\U0001f3a8  Theme", bg=BG_CARD, fg=ACCENT_LIGHT, font=("", 9, "bold"), anchor="w").pack(fill="x")
+        card = CollapsibleCard(page, "\U0001f3a8  Theme", collapsed=True)
+        body = card.body
 
-        body = tk.Frame(card, bg=BG_CARD)
-        body.pack(fill="x", pady=(4, 0))
-
-        # color entries
-        color_keys = [
-            ("bg_dark",     "Background"),
-            ("bg_mid",      "Mid BG"),
-            ("bg_card",     "Card"),
-            ("bg_input",    "Input"),
-            ("accent",      "Accent"),
-            ("accent_light","Accent Lt"),
-            ("text_white",  "Text"),
-            ("text_gray",   "Text Dim"),
-        ]
         fallback = {"bg_dark": BG_DARK, "bg_mid": BG_MID, "bg_card": BG_CARD, "bg_input": BG_INPUT,
                      "accent": ACCENT, "accent_light": ACCENT_LIGHT, "text_white": TEXT_WHITE, "text_gray": TEXT_GRAY}
+        color_keys = [
+            ("bg_dark",     "Background"), ("bg_mid", "Mid BG"),
+            ("bg_card",     "Card"),        ("bg_input", "Input"),
+            ("accent",      "Accent"),      ("accent_light", "Accent Lt"),
+            ("text_white",  "Text"),        ("text_gray", "Text Dim"),
+        ]
         self._color_vars = {}
         for col, (cfg_key, label) in enumerate(color_keys):
             var = tk.StringVar(value=cfg.get(f"color_{cfg_key}", fallback[cfg_key]))
@@ -794,27 +863,22 @@ class App(tk.Tk):
                             width=3, cursor="hand2", command=lambda: None)
             btn.pack(side="left")
             tk.Label(f, text=label, bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(3, 0))
-        # wire button commands (capture var+btn correctly)
         for col, (cfg_key, _) in enumerate(color_keys):
             var = self._color_vars[cfg_key]
-            f = body.grid_slaves(row=0, column=idx)[0]
+            f = body.grid_slaves(row=0, column=col)[0]
             btn = f.winfo_children()[0]
             btn.config(command=lambda v=var, b=btn: self._pick_color(v, b))
 
-        # gradient section
-        grad_frame = tk.Frame(card, bg=BG_CARD)
+        grad_frame = tk.Frame(body, bg=BG_CARD)
         grad_frame.pack(fill="x", pady=(4, 0))
-
         self._gradient_var = tk.BooleanVar(value=cfg.get("gradient_enabled", False))
         cb = tk.Checkbutton(grad_frame, text="Gradient Top Bar", variable=self._gradient_var,
                             bg=BG_CARD, fg=TEXT_WHITE, selectcolor=BG_INPUT,
                             activebackground=BG_CARD, activeforeground=TEXT_WHITE,
                             font=("", 8), cursor="hand2")
         cb.pack(side="left")
-
         self._grad_from_var = tk.StringVar(value=cfg.get("gradient_from", GRADIENT_FROM))
         self._grad_to_var = tk.StringVar(value=cfg.get("gradient_to", GRADIENT_TO))
-
         for gvar, glabel in ((self._grad_from_var, "From"), (self._grad_to_var, "To")):
             f = tk.Frame(grad_frame, bg=BG_CARD)
             f.pack(side="left", padx=(8, 0))
@@ -823,8 +887,7 @@ class App(tk.Tk):
             btn.pack(side="left")
             btn.config(command=lambda v=gvar, b=btn: self._pick_color(v, b))
             tk.Label(f, text=glabel, bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left", padx=(3, 0))
-
-        tk.Label(card, text="Restart to apply theme changes", bg=BG_CARD, fg=TEXT_GRAY,
+        tk.Label(body, text="Restart to apply theme changes", bg=BG_CARD, fg=TEXT_GRAY,
                  font=("", 7, "italic")).pack(anchor="w", pady=(2, 0))
 
     def _write_log(self, msg):
