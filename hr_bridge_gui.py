@@ -110,6 +110,7 @@ class HRBridge:
         self._client = None
         self.bpm_history = []
         self._pulse = 0.0
+        self.paused = False
 
     def log_msg(self, msg):
         self.log(msg)
@@ -148,14 +149,14 @@ class HRBridge:
 
     def send_osc(self):
         chat = self._build_chatbox()
-        self.osc.send_message("/avatar/parameters/isHRConnected", True)
+        self.osc.send_message("/avatar/parameters/isHRConnected", not self.paused)
         self.osc.send_message("/avatar/parameters/HR", int(self.bpm))
         self.osc.send_message("/avatar/parameters/floatHR", min(self.bpm / 255.0, 1.0))
         self.osc.send_message("/avatar/parameters/HRBattery", self.battery)
         self.osc.send_message("/avatar/parameters/HRBatteryFloat", self.battery / 100.0)
         self.osc.send_message("/avatar/parameters/HRMin", int(self.hr_min if self.hr_min != 999 else self.bpm))
         self.osc.send_message("/avatar/parameters/HRMax", int(self.hr_max))
-        if chat:
+        if chat and not self.paused:
             self.osc.send_message("/chatbox/input", [chat, True])
         self._log_line()
 
@@ -691,7 +692,7 @@ class App(tk.Tk):
         self._qbtn(self.egg_frame, "Custom short text for Egg Mode\nReplaces the template entirely\nSent as-is to chatbox")
         tk.Label(self.egg_frame, text="Egg text", bg=BG_DARK, fg=TEXT_GRAY, font=("", 7)).pack(side="left")
 
-        # start / stop
+        # start / stop / pause
         btn_frame = tk.Frame(page, bg=BG_DARK)
         btn_frame.pack(fill="x", pady=(10, 0))
         self.btn = tk.Button(btn_frame, text="\u25b6  Start", font=("", 10, "bold"),
@@ -699,6 +700,12 @@ class App(tk.Tk):
                              activebackground="#6ee7a0", cursor="hand2",
                              command=self._toggle)
         self.btn.pack(side="left")
+        self._pause_btn = tk.Button(btn_frame, text="\u23f8  Pause", font=("", 10, "bold"),
+                                    bg=BG_MID, fg=TEXT_WHITE, bd=0, padx=14, pady=4,
+                                    activebackground=BG_CARD, cursor="hand2",
+                                    command=self._toggle_pause)
+        self._pause_btn.pack(side="left", padx=(8, 0))
+        self._pause_btn.pack_forget()
 
         # dev panel
         self._dev_build(page, cfg)
@@ -1017,7 +1024,10 @@ class App(tk.Tk):
         running = self.bridge and self.bridge.running
         bpm = self.bridge.bpm if self.bridge else 0
         src = self.hr_source.get() if hasattr(self, "hr_source") else "ble"
-        if running and bpm > 0:
+        paused = self.bridge.paused if self.bridge else False
+        if running and paused:
+            self._status_label.config(text=f"\u23f8 Paused  \u2764\ufe0f {bpm}", fg="#eab308")
+        elif running and bpm > 0:
             self._status_label.config(text=f"\u25cf Connected  \u2764\ufe0f {bpm}", fg=ACCENT_LIGHT)
         elif running:
             self._status_label.config(text="\u25cb Connecting\u2026", fg="yellow")
@@ -1292,6 +1302,8 @@ class App(tk.Tk):
         if self.bridge and self.bridge.running:
             self.bridge.stop()
             self.btn.config(text="\u25b6  Start", bg=SUCCESS)
+            self._pause_btn.pack_forget()
+            self._pause_btn.config(text="\u23f8  Pause", bg=BG_MID, fg=TEXT_WHITE)
             save_config(self._gather_config())
         else:
             self.log.config(state="normal")
@@ -1323,6 +1335,16 @@ class App(tk.Tk):
             )
             self.bridge.start()
             self.btn.config(text="\u25a0  Stop", bg=DANGER)
+            self._pause_btn.pack(side="left", padx=(8, 0))
+
+    def _toggle_pause(self):
+        if not self.bridge or not self.bridge.running:
+            return
+        self.bridge.paused = not self.bridge.paused
+        if self.bridge.paused:
+            self._pause_btn.config(text="\u25b6  Resume", bg="#eab308", fg="#000")
+        else:
+            self._pause_btn.config(text="\u23f8  Pause", bg=BG_MID, fg=TEXT_WHITE)
 
     def _on_close(self):
         save_config(self._gather_config())
