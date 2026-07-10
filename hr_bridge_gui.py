@@ -94,9 +94,63 @@ def get_pear_media_sync(port):
         return None
 
 
+# ── System Stats ──────────────────────────────────────────────
+def get_system_stats():
+    """Returns {cpu (int), ram (int %), ram_gb (float)} or None."""
+    try:
+        if IS_LINUX:
+            # CPU
+            with open("/proc/stat") as f:
+                vals = list(map(int, f.readline().split()[1:5]))
+            total = sum(vals)
+            idle = vals[3]
+            # Mem
+            with open("/proc/meminfo") as f:
+                lines = f.readlines()
+            mem_total = int([l for l in lines if "MemTotal" in l][0].split()[1])
+            mem_avail = int([l for l in lines if "MemAvailable" in l][0].split()[1])
+            ram = int((mem_total - mem_avail) / mem_total * 100)
+            ram_gb = round((mem_total - mem_avail) / 1_048_576, 1)
+            # For CPU we need two samples; return 0 on first call, caller caches
+            return {"cpu": total, "idle": idle, "ram": ram, "ram_gb": ram_gb}
+        else:
+            import ctypes
+            kernel = ctypes.windll.kernel32
+            # CPU
+            idle, kernel_t, user_t = ctypes.c_ulonglong(), ctypes.c_ulonglong(), ctypes.c_ulonglong()
+            kernel.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel_t), ctypes.byref(user_t))
+            total = idle.value + kernel_t.value + user_t.value
+            # RAM
+            mem = ctypes.c_ulonglong()
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GlobalMemoryStatusEx.c_ulonglong = ctypes.c_ulonglong
+            buf = ctypes.create_string_buffer(64)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(buf))
+            # MEMORYSTATUSEX layout: 8 bytes dwLength, 4 dwMemoryLoad, 8 ullTotalPhys, 8 ullAvailPhys ...
+            mem_load = int.from_bytes(buf[8:12], "little")
+            total_phys = int.from_bytes(buf[12:20], "little")
+            avail_phys = int.from_bytes(buf[20:28], "little")
+            ram_gb = round((total_phys - avail_phys) / (1024**3), 1)
+            return {"cpu": total, "idle": idle.value, "ram": mem_load, "ram_gb": ram_gb}
+    except:
+        return None
+
+def get_cpu_percent(stats):
+    """Convert raw cpu ticks to a 0-100 percentage given previous sample."""
+    if not stats:
+        return 0
+    prev = getattr(get_cpu_percent, "_prev", None)
+    if not prev:
+        get_cpu_percent._prev = stats
+        return 0
+    total_delta = (stats["cpu"] - prev["cpu"]) or 1
+    idle_delta = stats["idle"] - prev["idle"]
+    get_cpu_percent._prev = stats
+    return int((1 - idle_delta / total_delta) * 100)
+
 # ── Bridge Engine ───────────────────────────────────────────
 class HRBridge:
-    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, show_extremes=True, status_text="", poll_interval=3, keepalive_interval=30, osc_host="127.0.0.1", osc_port=9000, media_source="none", pear_port=PEAR_DEFAULT_PORT, hr_source="ble", hyperate_id="", hyperate_key=""):
+    def __init__(self, address, template, log_cb, show_hr=True, show_battery=True, show_media=False, show_status=False, show_extremes=True, show_system_stats=False, status_text="", poll_interval=3, keepalive_interval=30, osc_host="127.0.0.1", osc_port=9000, media_source="none", pear_port=PEAR_DEFAULT_PORT, hr_source="ble", hyperate_id="", hyperate_key=""):
         self.address = address
         self.template = template
         self.log = log_cb
@@ -105,6 +159,7 @@ class HRBridge:
         self.show_media = show_media
         self.show_status = show_status
         self.show_extremes = show_extremes
+        self.show_system_stats = show_system_stats
         self.status_text = status_text
         self.poll_interval = poll_interval
         self.keepalive_interval = keepalive_interval
@@ -125,6 +180,10 @@ class HRBridge:
         self.media_duration = 0
         self._client = None
         self.bpm_history = []
+        self.cpu = 0
+        self.ram = 0
+        self.ram_gb = 0.0
+        self._sys_stats = None
         self._pulse = 0.0
         self.paused = False
 
@@ -160,6 +219,12 @@ class HRBridge:
         else:
             text = text.replace("{song}", "").replace("{artist}", "").replace("{title}", "")
             text = text.replace("{media_progress}", "0").replace("{media_position}", "00:00").replace("{media_duration}", "00:00")
+        if self.show_system_stats:
+            text = text.replace("{cpu}", str(self.cpu))
+            text = text.replace("{ram}", str(self.ram))
+            text = text.replace("{ram_gb}", f"{self.ram_gb:.1f}")
+        else:
+            text = text.replace("{cpu}", "0").replace("{ram}", "0").replace("{ram_gb}", "0.0")
         return " ".join(text.split()).strip()
 
     def _log_line(self):
@@ -172,6 +237,8 @@ class HRBridge:
             parts.append(f"\U0001f50b {self.battery}%")
         if self.show_media and (self.song or self.artist):
             parts.append(f"\U0001f3b5 {self.song or self.artist}")
+        if self.show_system_stats:
+            parts.append(f"\U0001f5a5 {self.cpu}% \U0001f4be {self.ram}%")
         self.log_msg("  " + "  ".join(parts))
 
     def send_osc(self):
@@ -189,6 +256,12 @@ class HRBridge:
                 self.osc.send_message("/avatar/parameters/MediaProgress", min(self.media_position / dur, 1.0))
             else:
                 self.osc.send_message("/avatar/parameters/MediaProgress", 0.0)
+        if self.show_system_stats:
+            self.osc.send_message("/avatar/parameters/CPU", self.cpu)
+            self.osc.send_message("/avatar/parameters/CPUFloat", self.cpu / 100.0)
+            self.osc.send_message("/avatar/parameters/RAM", self.ram)
+            self.osc.send_message("/avatar/parameters/RAMFloat", self.ram / 100.0)
+            self.osc.send_message("/avatar/parameters/RAMGB", self.ram_gb)
         if chat and not self.paused:
             self.osc.send_message("/chatbox/input", [chat, True])
         self._log_line()
@@ -220,7 +293,16 @@ class HRBridge:
             self.hr_min = bpm
         if bpm > self.hr_max:
             self.hr_max = bpm
+        if self.show_system_stats:
+            self._fetch_system_stats()
         self.send_osc()
+
+    def _fetch_system_stats(self):
+        stats = get_system_stats()
+        if stats:
+            self.cpu = get_cpu_percent(stats)
+            self.ram = stats["ram"]
+            self.ram_gb = stats["ram_gb"]
 
     async def _cache_linux(self):
         proc = await asyncio.create_subprocess_exec(
@@ -693,14 +775,14 @@ class App(tk.Tk):
         self._template_entry.pack(fill="x", pady=(6, 2))
         vars_row = tk.Frame(card2, bg=BG_CARD)
         vars_row.pack(fill="x")
-        tk.Label(vars_row, text="{bpm} {hr_min} {hr_max} {battery} {song} {artist} {title} {media_progress} {media_position} {media_duration}",
+        tk.Label(vars_row, text="{bpm} {hr_min} {hr_max} {battery} {cpu} {ram} {ram_gb} {song} {artist} {title} {media_progress} {media_position} {media_duration}",
                  bg=BG_CARD, fg=TEXT_GRAY, font=("", 7)).pack(side="left")
-        self._qbtn(vars_row, "Variables you can use:\n{bpm} - heart rate\n{hr_min} / {hr_max} - min/max\n{battery} - battery %\n{song} / {artist} / {title} - media\n{media_progress} - 0.00-1.00 position\n{media_position} - mm:ss\n{media_duration} - mm:ss\nExample: ❤ {bpm} BPM | 🔋 {battery}%")
+        self._qbtn(vars_row, "Variables you can use:\n{bpm} - heart rate\n{hr_min} / {hr_max} - min/max\n{battery} - battery %\n{cpu} - CPU usage %\n{ram} - RAM usage %\n{ram_gb} - RAM used (GB)\n{song} / {artist} / {title} - media\n{media_progress} - 0.00-1.00 position\n{media_position} - mm:ss\n{media_duration} - mm:ss\nExample: ❤ {bpm} BPM | 🔋 {battery}%")
 
         # template builder buttons
         btn_row = tk.Frame(card2, bg=BG_CARD)
         btn_row.pack(fill="x", pady=(2, 0))
-        for t in ("{bpm}", "{hr_min}", "{hr_max}", "{battery}", "{song}", "{artist}", "{title}", "{media_progress}", "{media_position}", "{media_duration}"):
+        for t in ("{bpm}", "{hr_min}", "{hr_max}", "{battery}", "{cpu}", "{ram}", "{ram_gb}", "{song}", "{artist}", "{title}", "{media_progress}", "{media_position}", "{media_duration}"):
             b = tk.Button(btn_row, text=t, font=("Consolas", 7), bg=BG_MID, fg=TEXT_WHITE,
                           bd=0, padx=4, cursor="hand2", command=lambda t=t: self._insert_template(t))
             b.pack(side="left", padx=(0, 2))
@@ -756,6 +838,7 @@ class App(tk.Tk):
         toggles_data = [
             ("\u2764  Heart Rate", "hr", True, "Stream heart rate to VRChat\nOSC: /avatar/parameters/HR"),
             ("\U0001f50b  Battery", "battery", True, "Stream watch battery level\nOSC: /avatar/parameters/HRBattery"),
+            ("\U0001f5a5  System Stats", "system_stats", False, "Stream CPU & RAM usage\nOSC: /avatar/parameters/CPU, /RAM, /RAMGB"),
             ("\U0001f3b5  Media Info", "media", False, "Stream current song info\nSources: winrt (Windows) / Pear Desktop"),
             ("\U0001f7e2  Min / Max HR", "extremes", True, "Track min & max heart rate\nauto-resets on reconnection"),
             ("\U0001f95a  Egg Mode", "egg", False, "Replace template with custom\nshort text (chatbox pillar style)"),
@@ -779,6 +862,7 @@ class App(tk.Tk):
 
         self.chk_hr = self._toggles_vars["hr"]
         self.chk_batt = self._toggles_vars["battery"]
+        self.chk_sysstats = self._toggles_vars["system_stats"]
         self.chk_media = self._toggles_vars["media"]
         self.chk_extremes = self._toggles_vars["extremes"]
         self.chk_egg = self._toggles_vars["egg"]
@@ -936,6 +1020,7 @@ class App(tk.Tk):
             if hasattr(self, "chk_hr"):
                 self.bridge.show_hr = self.chk_hr.get()
                 self.bridge.show_battery = self.chk_batt.get()
+                self.bridge.show_system_stats = self.chk_sysstats.get()
                 self.bridge.show_media = self.chk_media.get()
                 self.bridge.show_extremes = self.chk_extremes.get()
                 self.bridge.show_status = self.chk_egg.get()
@@ -1302,6 +1387,7 @@ class App(tk.Tk):
             "template": self.template.get(),
             "hr": self.chk_hr.get(),
             "battery": self.chk_batt.get(),
+            "system_stats": self.chk_sysstats.get(),
             "media": self.chk_media.get(),
             "media_source": self.media_source.get(),
             "pear_port": self.pear_port.get(),
@@ -1356,6 +1442,7 @@ class App(tk.Tk):
                 log_cb=self.write_log,
                 show_hr=self.chk_hr.get(),
                 show_battery=self.chk_batt.get(),
+                show_system_stats=self.chk_sysstats.get(),
                 show_media=self.chk_media.get(),
                 media_source=self.media_source.get(),
                 pear_port=self.pear_port.get(),
