@@ -649,6 +649,7 @@ class App(tk.Tk):
         # template
         card2 = self._card(page, "Chatbox Format")
         self.template = tk.StringVar(value=cfg.get("template", DEFAULT_TEMPLATE))
+        self.template.trace_add("write", self._live_sync)
         self._template_entry = tk.Entry(card2, textvariable=self.template, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                                         bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=44)
         self._template_entry.pack(fill="x", pady=(6, 2))
@@ -682,6 +683,7 @@ class App(tk.Tk):
         self.egg_frame = tk.Frame(page, bg=BG_DARK)
         self.egg_frame.pack(fill="x", pady=(0, 0))
         self.egg_txt = tk.StringVar(value=cfg.get("egg_text", ""))
+        self.egg_txt.trace_add("write", self._live_sync)
         self._egg_entry = tk.Entry(self.egg_frame, textvariable=self.egg_txt, bg=BG_INPUT, fg=TEXT_WHITE,
                                    insertbackground=TEXT_WHITE, bd=0, highlightthickness=1,
                                    highlightbackground=BG_MID, highlightcolor=ACCENT, width=44)
@@ -718,6 +720,8 @@ class App(tk.Tk):
         for i, (label, key, default, tip) in enumerate(toggles_data):
             var = tk.BooleanVar(value=cfg.get(key, default))
             self._toggles_vars[key] = var
+            if key != "egg":
+                var.trace_add("write", self._live_sync)
             f = tk.Frame(body, bg=BG_CARD)
             f.pack(side="left", padx=(0, 8), pady=2)
             cb = tk.Checkbutton(f, text=label, variable=var,
@@ -877,6 +881,21 @@ class App(tk.Tk):
         self.dev_frame.pack(fill="x", pady=(6, 0))
 
     # ── helpers ───────────────────────────────────────────────
+    def _live_sync(self, *_):
+        """Save config + sync template/toggles to running bridge instantly."""
+        if not hasattr(self, "template"):
+            return
+        save_config(self._gather_config())
+        if self.bridge and self.bridge.running:
+            self.bridge.template = self.template.get()
+            self.bridge.status_text = self.egg_txt.get()
+            if hasattr(self, "chk_hr"):
+                self.bridge.show_hr = self.chk_hr.get()
+                self.bridge.show_battery = self.chk_batt.get()
+                self.bridge.show_media = self.chk_media.get()
+                self.bridge.show_extremes = self.chk_extremes.get()
+                self.bridge.show_status = self.chk_egg.get()
+
     def _toggle_hr_fields(self, *_):
         show = self.hr_source.get() == "hyperate"
         for f in (self.hr_id_frame, self.hr_key_frame):
@@ -903,6 +922,7 @@ class App(tk.Tk):
         state = "normal" if mode else "disabled"
         self._egg_entry.configure(state=state)
         self._template_entry.configure(state="disabled" if mode else "normal")
+        self._live_sync()
 
     def _insert_template(self, text):
         """Insert text at cursor in template entry; mirror to egg if toggled."""
