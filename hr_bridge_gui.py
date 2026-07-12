@@ -533,9 +533,6 @@ def record_history(bpm, hr_min, hr_max):
 
 
 # ── GUI ─────────────────────────────────────────────────────
-# ── Constants ──────────────────────────────────────────────────
-BLANK_EGG_SECRETS = ("boihanny", "sr4 series")
-
 # ── Color Palette (Magic Chatbox inspired) ─────────────────────
 BG_DARK     = "#1a1a2e"
 BG_MID      = "#232244"
@@ -721,6 +718,7 @@ class App(tk.Tk):
         self.bridge = None
         self.egg_dev = False
         self._autostarted_this_session = False
+        self._qmark_clicks = 0
 
         # ── top bar ─────────────────────────────────────────
         top = tk.Frame(self, bg=BG_MID, height=48)
@@ -785,7 +783,7 @@ class App(tk.Tk):
         # ── egg toggle initial state after all pages exist ──
         self._on_egg_toggle()
 
-        # ── BlankEgg config restore ──
+        # ── restore dev mode from config ──
         if cfg.get("blank_egg", False):
             self.egg_dev = True
             self._show_dev()
@@ -827,7 +825,29 @@ class App(tk.Tk):
                        fg=TEXT_GRAY, font=("", 7, "bold"), cursor="question_arrow")
         lbl.pack(side="left", padx=(2, 0))
         ToolTip(lbl, text)
+        lbl.bind("<Button-1>", lambda e: self._on_qmark_click())
         return lbl
+
+    def _on_qmark_click(self):
+        self._qmark_clicks += 1
+        if self._qmark_clicks >= 7 and not self.egg_dev:
+            self.egg_dev = True
+            self._show_dev()
+            self._show_toast("Dev Mode unlocked!")
+            self._write_log("  \U0001f3eb Dev Mode unlocked! (clicked ? 7 times)")
+
+    def _show_toast(self, msg):
+        tw = tk.Toplevel(self)
+        tw.wm_overrideredirect(True)
+        tw.attributes("-topmost", True)
+        tw.configure(bg=ACCENT)
+        tk.Label(tw, text=msg, fg=TEXT_WHITE, bg=ACCENT, font=("", 9, "bold"),
+                 padx=16, pady=10).pack()
+        self.update_idletasks()
+        x = self.winfo_x() + self.winfo_width() - tw.winfo_width() - 12
+        y = self.winfo_y() + self.winfo_height() - tw.winfo_height() - 40
+        tw.geometry(f"+{x}+{y}")
+        tw.after(2500, tw.destroy)
 
     # ── page: status ──────────────────────────────────────────
     def _build_status_page(self, page, cfg):
@@ -1212,15 +1232,6 @@ class App(tk.Tk):
     def _reset_extremes(self):
         if self.bridge:
             self.bridge.reset_hr_extremes()
-
-    def _check_blank_egg(self, _event=None):
-        txt = self.egg_txt.get().strip().lower()
-        if txt in BLANK_EGG_SECRETS and not self.egg_dev:
-            self.egg_dev = True
-            self._show_dev()
-            self._write_log("  \U0001f3eb BlankEgg Dev Mode unlocked!")
-            from tkinter import messagebox
-            messagebox.showinfo("\U0001f3eb Egg", "u found the dev egggmoooodeee go to dev options")
 
     def _on_egg_toggle(self):
         mode = self.chk_egg.get()
