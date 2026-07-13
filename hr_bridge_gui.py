@@ -873,6 +873,7 @@ class App(tk.Tk):
         tk.Label(addr_row, text="BLE Address", bg=BG_CARD, fg=TEXT_GRAY, font=("", 8)).pack(side="left")
         self._qbtn(addr_row, "Watch Bluetooth MAC address\nExample: 96:D6:AF:D0:2B:6E\nTap watch screen first to wake it")
         self.addr = tk.StringVar(value=cfg.get("address", DEFAULT_ADDR))
+        self.addr.trace_add("write", self._live_sync)
         tk.Entry(addr_row, textvariable=self.addr, bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                  bd=0, highlightthickness=1, highlightbackground=BG_MID, highlightcolor=ACCENT, width=24).pack(side="right")
 
