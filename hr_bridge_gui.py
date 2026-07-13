@@ -1143,7 +1143,7 @@ class App(tk.Tk):
         grid.pack(fill="x", pady=(4, 0))
 
         fields = [
-            ("Poll (s)", "poll_interval", 3, "How often to read the watch (seconds)"),
+            ("Poll (s)", "poll_interval", 3.0, "How often to read the watch (seconds)\n0.5 increments"),
             ("Keepalive (s)", "keepalive_interval", 30, "How often to send keepalive (seconds)"),
             ("OSC Host", "osc_host", "127.0.0.1", "VRChat OSC host IP\nDefault: 127.0.0.1"),
             ("Port", "osc_port", 9000, "VRChat OSC port\nDefault: 9000"),
@@ -1163,7 +1163,7 @@ class App(tk.Tk):
                                highlightcolor=ACCENT, width=6, buttonbackground=BG_MID)
             elif isinstance(default, float):
                 var = tk.DoubleVar(value=cfg.get(key, default))
-                w = tk.Spinbox(grid, from_=1, to=10, increment=0.5, textvariable=var,
+                w = tk.Spinbox(grid, from_=0.5, to=10, increment=0.5, textvariable=var,
                                bg=BG_INPUT, fg=TEXT_WHITE, bd=0, highlightthickness=1,
                                highlightbackground=BG_MID, highlightcolor=ACCENT, width=6,
                                buttonbackground=BG_MID)
@@ -1856,7 +1856,7 @@ class App(tk.Tk):
             "blank_egg": self.egg_dev,
             "mirror_egg": self._mirror_egg_var.get() if hasattr(self, "_mirror_egg_var") else False,
             "autostart_vrchat": self._autostart_var.get() if hasattr(self, "_autostart_var") else False,
-            "poll_interval": self._dev_vars["poll_interval"].get() if self.egg_dev else 3,
+            "poll_interval": self._dev_vars["poll_interval"].get() if self.egg_dev else 3.0,
             "keepalive_interval": self._dev_vars["keepalive_interval"].get() if self.egg_dev else 30,
             "osc_host": self._dev_vars["osc_host"].get() if self.egg_dev else "127.0.0.1",
             "osc_port": self._dev_vars["osc_port"].get() if self.egg_dev else 9000,
@@ -1887,7 +1887,7 @@ class App(tk.Tk):
             self.log.config(state="normal")
             self.log.delete("1.0", "end")
             self.log.config(state="disabled")
-            poll = self._dev_vars["poll_interval"].get() if self.egg_dev else 3
+            poll = self._dev_vars["poll_interval"].get() if self.egg_dev else 3.0
             ka = self._dev_vars["keepalive_interval"].get() if self.egg_dev else 30
             host = self._dev_vars["osc_host"].get() if self.egg_dev else "127.0.0.1"
             port = self._dev_vars["osc_port"].get() if self.egg_dev else 9000
