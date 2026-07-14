@@ -482,6 +482,10 @@ class HRBridge:
 
 
 # ── Config ──────────────────────────────────────────────────
+if getattr(sys, 'frozen', False):
+    _DATA_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(_DATA_DIR, "bridge_config.json")
 
 DEFAULT_PRESETS = {
@@ -506,10 +510,6 @@ def save_config(data):
 
 
 # ── HR History ────────────────────────────────────────────────
-if getattr(sys, 'frozen', False):
-    _DATA_DIR = os.path.dirname(os.path.abspath(sys.executable))
-else:
-    _DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_PATH = os.path.join(_DATA_DIR, "hr_history.json")
 
 def load_history():
